@@ -24,6 +24,29 @@
         }
       }
     },
+    "center_map_off_content_description" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Center map off current location"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Descentrar mapa de la ubicación actual"
+          }
+        },
+        "es-US" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Descentrar mapa de la ubicación actual"
+          }
+        }
+      }
+    },
     "dismiss_button_title" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -329,19 +352,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Still locating… Moving may help"
+            "value" : "Still locating… Walking may help"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Aún buscando… Podría ayudar si te mueves"
+            "value" : "Aún buscando… Caminar podría ayudar"
           }
         },
         "es-US" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Aún buscando… Podría ayudar si te mueves"
+            "value" : "Aún buscando… Caminar podría ayudar"
           }
         }
       }
