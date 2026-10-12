@@ -1,1 +1,15 @@
-okay
+import UIKit
+
+/// Appearance values for one scanner. Defaults use UIKit and require no resource bundle.
+/// Supply host colors here; fonts and images for barcode annotations are supplied through
+/// `OsirisBoundingBoxConfig`, and audio through `OsirisFeedbackConfig`.
+public struct OsirisScannerAppearance {
+    public var reticleColor: UIColor
+    public var detectedReticleColor: UIColor
+
+    public init(reticleColor: UIColor = .white,
+                detectedReticleColor: UIColor = .systemYellow) {
+        self.reticleColor = reticleColor
+        self.detectedReticleColor = detectedReticleColor
+    }
+}
