@@ -1,48 +1,192 @@
 //
-//  UIColor+Extension.swift
-//  Diamond-sdk
+//  Color.swift
+//  DiamondRnMvpoc
 //
-//  Created by Adam Bemowski on 6/19/23.
+//  Created by Andres Vinueza on 3/14/23.
 //
+import SwiftUI
 
-import Foundation
-import UIKit
-
-/// Compatibility namespace for the legacy color convenience helpers.
-public class DiamondColor {
-    static func color(named name: String) -> UIColor {
-        if let color = OsirisUIResourceRegistry.provider?.color(named: name) {
-            return color
-        }
-        // Preserve semantic families without embedding the branded color palette.
-        switch name {
-        case "clear": return .clear
-        case "gray00": return .systemBackground
-        case "gray200": return .label
-        case _ where name.hasPrefix("blue"): return .systemBlue
-        case _ where name.hasPrefix("red"): return .systemRed
-        case _ where name.hasPrefix("green"): return .systemGreen
-        case _ where name.hasPrefix("yellow") || name.hasPrefix("spark"): return .systemYellow
-        case _ where name.hasPrefix("orange"): return .systemOrange
-        case _ where name.hasPrefix("pink"): return .systemPink
-        case _ where name.hasPrefix("purple"): return .systemPurple
-        case _ where name.hasPrefix("gray"): return .systemGray
-        default: return .label
-        }
+/// Legacy palette names resolved through the host provider or system colors.
+@available(iOS 15.0, *)
+public extension Color {
+    /// Legacy name retained for source compatibility. The host provider supplies
+    /// named colors; absent values use system colors without a bundle lookup.
+    static func fromBundle(_ name: String) -> Color {
+        Color(DiamondColor.color(named: name))
     }
-}
-
-/// Convenience getters for custom UIColors
-public extension UIColor {
-    static var grayPrimary: UIColor { DiamondColor.color(named: "gray160") }
-    static var graySecondary: UIColor { DiamondColor.color(named: "gray100") }
-    static var grayDisabled: UIColor { DiamondColor.color(named: "gray50") }
-    static var grayLight: UIColor { DiamondColor.color(named: "gray30") }
-    static var blueBrand: UIColor { DiamondColor.color(named: "blue100") }
-    static var blueBrandSelected: UIColor { DiamondColor.color(named: "blue160") }
-    static var blueBrandLight: UIColor { DiamondColor.color(named: "blue10") }
-    static var redDesctructive: UIColor { DiamondColor.color(named: "red100") }
-    static var greenGo: UIColor { DiamondColor.color(named: "green100") }
-    static var spark100: UIColor { DiamondColor.color(named: "spark100") }
-    static var yellow100: UIColor { DiamondColor.color(named: "yellow100") }
+    /// Clear color
+    static var clear: Color { Color.fromBundle("clear") }
+    static var blue05: Color { Color.fromBundle("blue05") }
+    static var blue10: Color { Color.fromBundle("blue10") }
+    static var blue20: Color { Color.fromBundle("blue20") }
+    static var blue30: Color { Color.fromBundle("blue30") }
+    static var blue40: Color { Color.fromBundle("blue40") }
+    static var blue50: Color { Color.fromBundle("blue50") }
+    static var blue60: Color { Color.fromBundle("blue60") }
+    static var blue70: Color { Color.fromBundle("blue70") }
+    static var blue80: Color { Color.fromBundle("blue80") }
+    static var blue90: Color { Color.fromBundle("blue90") }
+    static var blue100: Color { Color.fromBundle("blue100") }
+    static var blue110: Color { Color.fromBundle("blue110") }
+    static var blue120: Color { Color.fromBundle("blue120") }
+    static var blue130: Color { Color.fromBundle("blue130") }
+    static var blue140: Color { Color.fromBundle("blue140") }
+    static var blue150: Color { Color.fromBundle("blue150") }
+    static var blue160: Color { Color.fromBundle("blue160") }
+    static var blue170: Color { Color.fromBundle("blue170") }
+    static var blue180: Color { Color.fromBundle("blue180") }
+    static var red05: Color { Color.fromBundle("red05") }
+    static var red10: Color { Color.fromBundle("red10") }
+    static var red20: Color { Color.fromBundle("red20") }
+    static var red30: Color { Color.fromBundle("red30") }
+    static var red40: Color { Color.fromBundle("red40") }
+    static var red50: Color { Color.fromBundle("red50") }
+    static var red60: Color { Color.fromBundle("red60") }
+    static var red70: Color { Color.fromBundle("red70") }
+    static var red80: Color { Color.fromBundle("red80") }
+    static var red90: Color { Color.fromBundle("red90") }
+    static var red100: Color { Color.fromBundle("red100") }
+    static var red110: Color { Color.fromBundle("red110") }
+    static var red120: Color { Color.fromBundle("red120") }
+    static var red130: Color { Color.fromBundle("red130") }
+    static var red140: Color { Color.fromBundle("red140") }
+    static var red150: Color { Color.fromBundle("red150") }
+    static var red160: Color { Color.fromBundle("red160") }
+    static var red170: Color { Color.fromBundle("red170") }
+    static var red180: Color { Color.fromBundle("red180") }
+    static var orange05: Color { Color.fromBundle("orange05") }
+    static var orange10: Color { Color.fromBundle("orange10") }
+    static var orange20: Color { Color.fromBundle("orange20") }
+    static var orange30: Color { Color.fromBundle("orange30") }
+    static var orange40: Color { Color.fromBundle("orange40") }
+    static var orange50: Color { Color.fromBundle("orange50") }
+    static var orange60: Color { Color.fromBundle("orange60") }
+    static var orange70: Color { Color.fromBundle("orange70") }
+    static var orange80: Color { Color.fromBundle("orange80") }
+    static var orange90: Color { Color.fromBundle("orange90") }
+    static var orange100: Color { Color.fromBundle("orange100") }
+    static var orange110: Color { Color.fromBundle("orange110") }
+    static var orange120: Color { Color.fromBundle("orange120") }
+    static var orange130: Color { Color.fromBundle("orange130") }
+    static var orange140: Color { Color.fromBundle("orange140") }
+    static var orange150: Color { Color.fromBundle("orange150") }
+    static var orange160: Color { Color.fromBundle("orange160") }
+    static var orange170: Color { Color.fromBundle("orange170") }
+    static var orange180: Color { Color.fromBundle("orange180") }
+    static var spark05: Color { Color.fromBundle("spark05") }
+    static var spark10: Color { Color.fromBundle("spark10") }
+    static var spark20: Color { Color.fromBundle("spark20") }
+    static var spark30: Color { Color.fromBundle("spark30") }
+    static var spark40: Color { Color.fromBundle("spark40") }
+    static var spark50: Color { Color.fromBundle("spark50") }
+    static var spark60: Color { Color.fromBundle("spark60") }
+    static var spark70: Color { Color.fromBundle("spark70") }
+    static var spark80: Color { Color.fromBundle("spark80") }
+    static var spark90: Color { Color.fromBundle("spark90") }
+    static var spark100: Color { Color.fromBundle("spark100") }
+    static var spark110: Color { Color.fromBundle("spark110") }
+    static var spark120: Color { Color.fromBundle("spark120") }
+    static var spark130: Color { Color.fromBundle("spark130") }
+    static var spark140: Color { Color.fromBundle("spark140") }
+    static var spark150: Color { Color.fromBundle("spark150") }
+    static var spark160: Color { Color.fromBundle("spark160") }
+    static var spark170: Color { Color.fromBundle("spark170") }
+    static var spark180: Color { Color.fromBundle("spark180") }
+    static var yellow05: Color { Color.fromBundle("yellow05") }
+    static var yellow10: Color { Color.fromBundle("yellow10") }
+    static var yellow20: Color { Color.fromBundle("yellow20") }
+    static var yellow30: Color { Color.fromBundle("yellow30") }
+    static var yellow40: Color { Color.fromBundle("yellow40") }
+    static var yellow50: Color { Color.fromBundle("yellow50") }
+    static var yellow60: Color { Color.fromBundle("yellow60") }
+    static var yellow70: Color { Color.fromBundle("yellow70") }
+    static var yellow80: Color { Color.fromBundle("yellow80") }
+    static var yellow90: Color { Color.fromBundle("yellow90") }
+    static var yellow100: Color { Color.fromBundle("yellow100") }
+    static var yellow110: Color { Color.fromBundle("yellow110") }
+    static var yellow120: Color { Color.fromBundle("yellow120") }
+    static var yellow130: Color { Color.fromBundle("yellow130") }
+    static var yellow140: Color { Color.fromBundle("yellow140") }
+    static var yellow150: Color { Color.fromBundle("yellow150") }
+    static var yellow160: Color { Color.fromBundle("yellow160") }
+    static var yellow170: Color { Color.fromBundle("yellow170") }
+    static var yellow180: Color { Color.fromBundle("yellow180") }
+    static var pink05: Color { Color.fromBundle("pink05") }
+    static var pink10: Color { Color.fromBundle("pink10") }
+    static var pink20: Color { Color.fromBundle("pink20") }
+    static var pink30: Color { Color.fromBundle("pink30") }
+    static var pink40: Color { Color.fromBundle("pink40") }
+    static var pink50: Color { Color.fromBundle("pink50") }
+    static var pink60: Color { Color.fromBundle("pink60") }
+    static var pink70: Color { Color.fromBundle("pink70") }
+    static var pink80: Color { Color.fromBundle("pink80") }
+    static var pink90: Color { Color.fromBundle("pink90") }
+    static var pink100: Color { Color.fromBundle("pink100") }
+    static var pink110: Color { Color.fromBundle("pink110") }
+    static var pink120: Color { Color.fromBundle("pink120") }
+    static var pink130: Color { Color.fromBundle("pink130") }
+    static var pink140: Color { Color.fromBundle("pink140") }
+    static var pink150: Color { Color.fromBundle("pink150") }
+    static var pink160: Color { Color.fromBundle("pink160") }
+    static var pink170: Color { Color.fromBundle("pink170") }
+    static var pink180: Color { Color.fromBundle("pink180") }
+    static var purple05: Color { Color.fromBundle("purple05") }
+    static var purple10: Color { Color.fromBundle("purple10") }
+    static var purple20: Color { Color.fromBundle("purple20") }
+    static var purple30: Color { Color.fromBundle("purple30") }
+    static var purple40: Color { Color.fromBundle("purple40") }
+    static var purple50: Color { Color.fromBundle("purple50") }
+    static var purple60: Color { Color.fromBundle("purple60") }
+    static var purple70: Color { Color.fromBundle("purple70") }
+    static var purple80: Color { Color.fromBundle("purple80") }
+    static var purple90: Color { Color.fromBundle("purple90") }
+    static var purple100: Color { Color.fromBundle("purple100") }
+    static var purple110: Color { Color.fromBundle("purple110") }
+    static var purple120: Color { Color.fromBundle("purple120") }
+    static var purple130: Color { Color.fromBundle("purple130") }
+    static var purple140: Color { Color.fromBundle("purple140") }
+    static var purple150: Color { Color.fromBundle("purple150") }
+    static var purple160: Color { Color.fromBundle("purple160") }
+    static var purple170: Color { Color.fromBundle("purple170") }
+    static var purple180: Color { Color.fromBundle("purple180") }
+    static var green05: Color { Color.fromBundle("green05") }
+    static var green10: Color { Color.fromBundle("green10") }
+    static var green20: Color { Color.fromBundle("green20") }
+    static var green30: Color { Color.fromBundle("green30") }
+    static var green40: Color { Color.fromBundle("green40") }
+    static var green50: Color { Color.fromBundle("green50") }
+    static var green60: Color { Color.fromBundle("green60") }
+    static var green70: Color { Color.fromBundle("green70") }
+    static var green80: Color { Color.fromBundle("green80") }
+    static var green90: Color { Color.fromBundle("green90") }
+    static var green100: Color { Color.fromBundle("green100") }
+    static var green110: Color { Color.fromBundle("green110") }
+    static var green120: Color { Color.fromBundle("green120") }
+    static var green130: Color { Color.fromBundle("green130") }
+    static var green140: Color { Color.fromBundle("green140") }
+    static var green150: Color { Color.fromBundle("green150") }
+    static var green160: Color { Color.fromBundle("green160") }
+    static var green170: Color { Color.fromBundle("green170") }
+    static var green180: Color { Color.fromBundle("green180") }
+    static var gray00: Color { Color.fromBundle("gray00") }
+    static var gray05: Color { Color.fromBundle("gray05") }
+    static var gray10: Color { Color.fromBundle("gray10") }
+    static var gray20: Color { Color.fromBundle("gray20") }
+    static var gray30: Color { Color.fromBundle("gray30") }
+    static var gray40: Color { Color.fromBundle("gray40") }
+    static var gray50: Color { Color.fromBundle("gray50") }
+    static var gray60: Color { Color.fromBundle("gray60") }
+    static var gray70: Color { Color.fromBundle("gray70") }
+    static var gray80: Color { Color.fromBundle("gray80") }
+    static var gray90: Color { Color.fromBundle("gray90") }
+    static var gray100: Color { Color.fromBundle("gray100") }
+    static var gray110: Color { Color.fromBundle("gray110") }
+    static var gray120: Color { Color.fromBundle("gray120") }
+    static var gray130: Color { Color.fromBundle("gray130") }
+    static var gray140: Color { Color.fromBundle("gray140") }
+    static var gray150: Color { Color.fromBundle("gray150") }
+    static var gray160: Color { Color.fromBundle("gray160") }
+    static var gray170: Color { Color.fromBundle("gray170") }
+    static var gray180: Color { Color.fromBundle("gray180") }
+    static var gray200: Color { Color.fromBundle("gray200") }
 }
