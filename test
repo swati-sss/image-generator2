@@ -1,18 +1,48 @@
 //
-//  Image+Extension.swift
-//  Diamond
+//  UIColor+Extension.swift
+//  Diamond-sdk
 //
-//  Created by Andres Vinueza on 5/1/23.
+//  Created by Adam Bemowski on 6/19/23.
 //
 
-import SwiftUI
+import Foundation
 import UIKit
 
-@available(iOS 15.0, *)
-public extension Image {
-    /// Legacy name retained for source compatibility. Uses the explicitly
-    /// installed provider; it does not discover or require a resource bundle.
-    static func fromBundle(_ name: String) -> Image {
-        Image(uiImage: DiamondImage.image(named: name) ?? UIImage())
+/// Compatibility namespace for the legacy color convenience helpers.
+public class DiamondColor {
+    static func color(named name: String) -> UIColor {
+        if let color = OsirisUIResourceRegistry.provider?.color(named: name) {
+            return color
+        }
+        // Preserve semantic families without embedding the branded color palette.
+        switch name {
+        case "clear": return .clear
+        case "gray00": return .systemBackground
+        case "gray200": return .label
+        case _ where name.hasPrefix("blue"): return .systemBlue
+        case _ where name.hasPrefix("red"): return .systemRed
+        case _ where name.hasPrefix("green"): return .systemGreen
+        case _ where name.hasPrefix("yellow") || name.hasPrefix("spark"): return .systemYellow
+        case _ where name.hasPrefix("orange"): return .systemOrange
+        case _ where name.hasPrefix("pink"): return .systemPink
+        case _ where name.hasPrefix("purple"): return .systemPurple
+        case _ where name.hasPrefix("gray"): return .systemGray
+        default: return .label
+        }
     }
+}
+
+/// Convenience getters for custom UIColors
+public extension UIColor {
+    static var grayPrimary: UIColor { DiamondColor.color(named: "gray160") }
+    static var graySecondary: UIColor { DiamondColor.color(named: "gray100") }
+    static var grayDisabled: UIColor { DiamondColor.color(named: "gray50") }
+    static var grayLight: UIColor { DiamondColor.color(named: "gray30") }
+    static var blueBrand: UIColor { DiamondColor.color(named: "blue100") }
+    static var blueBrandSelected: UIColor { DiamondColor.color(named: "blue160") }
+    static var blueBrandLight: UIColor { DiamondColor.color(named: "blue10") }
+    static var redDesctructive: UIColor { DiamondColor.color(named: "red100") }
+    static var greenGo: UIColor { DiamondColor.color(named: "green100") }
+    static var spark100: UIColor { DiamondColor.color(named: "spark100") }
+    static var yellow100: UIColor { DiamondColor.color(named: "yellow100") }
 }
