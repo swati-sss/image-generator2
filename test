@@ -1,91 +1,92 @@
-import CoreText
+//
+//  UIFont+Extension.swift
+//  Diamond-sdk
+//
+//  Created by Adam Bemowski on 6/19/23.
+//
+
 import Foundation
-import Osiris
 import UIKit
 
-/// Optional presentation resources. Importing this module does not install them globally.
-public final class OsirisDefaultResourceProvider: NSObject, OsirisResourceProvider {
-    private let resourceBundle: Bundle? = {
-        #if SWIFT_PACKAGE
-        return Bundle.module
-        #else
-        // CocoaPods/binary hosts may embed the companion bundle in the framework
-        // or copy it alongside the app when linking the framework statically.
-        for container in [Bundle(for: OsirisDefaultResourceProvider.self), Bundle.main] {
-            if let url = container.url(forResource: "OsirisDefaultResources", withExtension: "bundle"),
-               let bundle = Bundle(url: url) {
-                return bundle
-            }
-        }
-        return nil
-        #endif
-    }()
-
-    public override init() {
-        super.init()
+/// Convenience getters for custom UIFonts
+public extension UIFont {
+    static func bogle(size: CGFloat) -> UIFont {
+        OsirisUIResourceRegistry.provider?.font(named: "Bogle-Regular", size: size)
+            ?? UIFont.systemFont(ofSize: size)
     }
 
-    public func color(named name: String) -> UIColor? {
-        guard let bundle = resourceBundle else { return nil }
-        return UIColor(named: name, in: bundle, compatibleWith: nil)
+    static func bogleBold(size: CGFloat) -> UIFont {
+        OsirisUIResourceRegistry.provider?.font(named: "Bogle-Bold", size: size)
+            ?? UIFont.boldSystemFont(ofSize: size)
     }
 
-    public func image(named name: String) -> UIImage? {
-        guard let bundle = resourceBundle else { return nil }
-        return UIImage(named: name, in: bundle, compatibleWith: nil)
+    static func bogleMono(size: CGFloat) -> UIFont {
+        OsirisUIResourceRegistry.provider?.font(named: "BogleMono-Regular", size: size)
+            ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+}
+
+/// Legacy font registration API. Font ownership and registration belong to the
+/// explicitly installed resource provider, not the core SDK.
+public class CustomFonts: NSObject {
+  private static let registrationLock = NSLock()
+  private static var storedRegistrationOverride: (() -> Void)?
+
+  // An internal reset point also lets tests restore the default registration path.
+  internal static var fontRegistrationOverride: (() -> Void)? {
+    get {
+      registrationLock.lock()
+      defer { registrationLock.unlock() }
+      return storedRegistrationOverride
+    }
+    set {
+      registrationLock.lock()
+      let previousOverride = storedRegistrationOverride
+      storedRegistrationOverride = newValue
+      registrationLock.unlock()
+      withExtendedLifetime(previousOverride) {}
+    }
+  }
+
+  public enum Style: CaseIterable {
+    case mono
+    case regular
+    case bold
+
+    public var value: String {
+      switch self {
+      case .mono: return "BogleMono-Regular"
+      case .regular: return "Bogle-Regular"
+      case .bold: return "Bogle-Bold"
+      }
     }
 
-    public func font(named name: String, size: CGFloat) -> UIFont? {
-        if let font = UIFont(name: name, size: size) {
-            return font
-        }
-        registerFont(named: name)
-        return UIFont(name: name, size: size)
+    public var font: UIFont {
+      switch self {
+      case .mono: return .bogleMono(size: 14)
+      case .regular: return .bogle(size: 14)
+      case .bold: return .bogleBold(size: 14)
+      }
     }
+  }
 
-    public func registerFonts() {
-        ["Bogle-Regular", "Bogle-Bold", "BogleMono-Regular", "BogleMono-Bold"].forEach {
-            registerFont(named: $0)
-        }
+  /// Reading this property preserves the legacy `_ = CustomFonts.loadFonts`
+  /// call pattern. It is also callable as `CustomFonts.loadFonts()`.
+  /// Providers should make repeated registration safe. An assigned closure is
+  /// returned unchanged and only executes when the caller invokes it, preserving
+  /// the previous settable-property behavior. Storage is synchronized; closures
+  /// and providers execute on the caller's queue, outside the storage lock.
+  public static var loadFonts: () -> Void {
+    get {
+      if let registration = fontRegistrationOverride {
+        return registration
+      }
+      OsirisUIResourceRegistry.provider?.registerFonts()
+      return {}
     }
+    set {
+      fontRegistrationOverride = newValue
+    }
+  }
 
-    /// Supply this URL through the scanner's feedback configuration to enable the default beep.
-    public var soundURL: URL? {
-        resourceBundle?.url(forResource: "scanbeep", withExtension: "wav")
-    }
-
-    /// Explicitly choose the original scanner colors for one scanner instance.
-    public func scannerAppearance() -> OsirisScannerAppearance {
-        OsirisScannerAppearance(
-            detectedReticleColor: color(named: "yellow100") ?? .systemYellow
-        )
-    }
-
-    /// Explicitly choose the bundled beep and medium haptic for successful scans.
-    public func feedbackConfig() -> OsirisFeedbackConfig {
-        OsirisFeedbackConfig(eventFeedback: [
-            .standard: Feedback(vibration: .medium, sound: soundURL)
-        ])
-    }
-
-    /// Default barcode annotations using the original Osiris border color.
-    public func boundingBoxConfig() -> OsirisBoundingBoxConfig {
-        OsirisBoundingBoxConfig(borderColor: color(named: "yellow100") ?? .systemYellow)
-    }
-
-    /// Opt existing Osiris UI helpers into these resources. Call before constructing that UI.
-    public func installForLegacyUI() {
-        registerFonts()
-        OsirisUIResourceRegistry.provider = self
-    }
-
-    private func registerFont(named name: String) {
-        guard UIFont(name: name, size: 12) == nil,
-              let bundle = resourceBundle,
-              let url = bundle.url(forResource: name, withExtension: "otf")
-                ?? bundle.url(forResource: name, withExtension: "otf", subdirectory: "Fonts") else {
-            return
-        }
-        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
-    }
 }
