@@ -1,62 +1,18 @@
 //
-//  UIImage+Extension.swift
-//  Osiris
+//  Image+Extension.swift
+//  Diamond
 //
-//  Created by Adam Bernowski on 8/24/23.
+//  Created by Andres Vinueza on 5/1/23.
 //
 
-import Foundation
+import SwiftUI
 import UIKit
 
-/// Compatibility namespace for the legacy image convenience helpers.
-@available(iOS 13.0, *)
-public class DiamondImage {
-    static func image(named name: String) -> UIImage? {
-        if let image = OsirisUIResourceRegistry.provider?.image(named: name) {
-            return image
-        }
-        switch name {
-        case "ic_caret_down": return UIImage(systemName: "chevron.down")
-        case "ic_barcode": return UIImage(systemName: "barcode")
-        case "ic_chevron_left": return UIImage(systemName: "chevron.left")
-        case "ic_flash": return UIImage(systemName: "bolt.fill")
-        case "ic_flash_slash": return UIImage(systemName: "bolt.slash.fill")
-        case "ic_close": return UIImage(systemName: "xmark")
-        case "ic_frame_top_left": return cornerImage(right: false, bottom: false)
-        case "ic_frame_top_right": return cornerImage(right: true, bottom: false)
-        case "ic_frame_bottom_left": return cornerImage(right: false, bottom: true)
-        case "ic_frame_bottom_right": return cornerImage(right: true, bottom: true)
-        default: return nil
-        }
+@available(iOS 15.0, *)
+public extension Image {
+    /// Legacy name retained for source compatibility. Uses the explicitly
+    /// installed provider; it does not discover or require a resource bundle.
+    static func fromBundle(_ name: String) -> Image {
+        Image(uiImage: DiamondImage.image(named: name) ?? UIImage())
     }
-
-    private static func cornerImage(right: Bool, bottom: Bool) -> UIImage {
-        let size = CGSize(width: 20, height: 20)
-        let image = UIGraphicsImageRenderer(size: size).image { renderer in
-            let context = renderer.cgContext
-            context.setStrokeColor(UIColor.white.cgColor)
-            context.setLineWidth(2)
-            let corner = CGPoint(x: right ? 19 : 1, y: bottom ? 19 : 1)
-            context.move(to: CGPoint(x: right ? 1 : 19, y: corner.y))
-            context.addLine(to: corner)
-            context.addLine(to: CGPoint(x: corner.x, y: bottom ? 1 : 19))
-            context.strokePath()
-        }
-        return image.withRenderingMode(.alwaysTemplate)
-    }
-}
-
-/// Convenience getters for custom UIImages
-@available(iOS 13.0, *)
-public extension UIImage {
-    static var caretDownIcon: UIImage? { DiamondImage.image(named: "ic_caret_down") }
-    static var barcodeIcon: UIImage? { DiamondImage.image(named: "ic_barcode") }
-    static var chevronLeft: UIImage? { DiamondImage.image(named: "ic_chevron_left") }
-    static var topLeftFrameIcon: UIImage? { DiamondImage.image(named: "ic_frame_top_left") }
-    static var topRightFrameIcon: UIImage? { DiamondImage.image(named: "ic_frame_top_right") }
-    static var bottomLeftFrameIcon: UIImage? { DiamondImage.image(named: "ic_frame_bottom_left") }
-    static var bottomRightFrameIcon: UIImage? { DiamondImage.image(named: "ic_frame_bottom_right") }
-    static var flashIcon: UIImage? { DiamondImage.image(named: "ic_flash") }
-    static var flashSlashIcon: UIImage? { DiamondImage.image(named: "ic_flash_slash") }
-    static var closeIcon: UIImage? { DiamondImage.image(named: "ic_close") }
 }
