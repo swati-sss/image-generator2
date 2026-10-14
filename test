@@ -1,806 +1,1146 @@
 //
-//  OsirisScannerViewController.swift
-//  FirebaseCore
+//  CameraManager.swift
+//  DiamondRnMvpoc
 //
-//  Created by Kyle McGinnis on 2/1/24.
+//  Created by Andres Vinueza on 3/10/23.
 //
 
 import AVFoundation
 import Combine
 import Foundation
+import os
 import Osiris
-import OsirisBarcode
 import UIKit
 
-public typealias BarcodeValue = String
-
-/// `OsirisScannerDelegate` delegate functions for receiving of barcode values, errors, and lifecycle events
-/// This needs to be set immediately after `OsirisScannerViewController` is instantiated in order to receive all events
-public protocol OsirisScannerDelegate: AnyObject {
-    func didTapDetectedBarcodeBoundingBox(_ barcode: Barcode, setBoundingBoxSettings: @escaping (_ settings: OsirisBoundingBoxConfig) -> Void)
-    func didDetectBarcodes(_ barcodes: [Barcode], setBoundingBoxesSettings: @escaping (_ settings: [BarcodeValue: OsirisBoundingBoxConfig]) -> Void)
-    func didDetectBarcode(_ barcode: Barcode)
-    func didFireEvent(_ event: OsirisEvent)
-    func didReceiveError(_ error: Error)
-    func cameraIdleDetected()
+// Temporary diagnostics for macro lens transition timing.
+func osirisMacroTrace(_ message: String) {
+    let ms = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+    print("[MacroTiming] \(ms)ms \(message)")
 }
 
-/// `OsirisScannerViewController` main object to allow for camaera display and decoding of barcodes.  This needs to be initialized and added to the view hierarchy of the embedding App's controller.
-/// `OsirisScannerDelegate` functions can be accessed after setting the `delegate` to allow for reading of Barcodes, accessing lifecycle events, and receiving errors.
-public final class OsirisScannerViewController: UIViewController {
-    
-    // MARK: Public Properties
-    
-    var frameCounter = 0
-    
-    /// Delegates barcode detection, events and errors
-    /// This needs to be set immediately after `OsirisScannerViewController` is instantiated in order to receive all events
-    public weak var delegate: OsirisScannerDelegate? {
-        didSet {
-            delegateDidUpdate()
+public final class CameraManager: NSObject, ObservableObject {
+    public func applyCameraPreset(_ preset: CameraPreferences.CameraPreset) {
+        let preferences = CameraPreferences.preset(preset)
+        self.cameraPreferences = preferences
+        
+        // Set frame rates based on preset
+        let frameRates = CameraPreferences.frameRates(for: preset)
+        userDefaults.activeVideoMinFrameRate = frameRates.min
+        userDefaults.activeVideoMaxFrameRate = frameRates.max
+        
+        // Set video stabilization based on preset
+        userDefaults.videoStabilizationEnabled = preferences.videoStabilizationEnabled
+        
+        if let device = currentDevice {
+            refreshCameraSettings(forCamera: device)
         }
     }
     
-    /// The name of the current decoder in use by the scanner
-    public var decoderID: String {
-        // Are we going to expose this?  Are we ok with that?
-        viewModel.title
+    internal static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier!,
+        category: String(describing: CameraManager.self)
+    )
+    
+    public enum Status: String {
+        case unconfigured = "permission has not been requested"
+        case configured = "all systems go"
+        case running = "running AVCaptureSession"
+        case unauthorized = "permission denied"
+        case failed = "failed to connect"
     }
     
-    /// Property indicating whether the camera is running, displaying and allow frames to be accessible from the scanner
-    public var cameraIsRunning: Bool {
-        viewModel.cameraIsRunning
+    internal let userDefaults: UserDefaults
+    
+    /// observable instance of the current `CameraError`
+    @Published public private(set) var error: CameraError?
+    
+    /// observable instnace of the image, represented as `Data`
+    @Published public internal(set) var imageData: Data?
+    
+    /// observale instance of the current camera status
+    @Published public private(set) var status = Status.unconfigured
+    private let statusSemaphore = DispatchSemaphore(value: 1)
+    private let sampleBufferDelegateSemaphore = DispatchSemaphore(value: 1)
+    
+    /// observable instace of the camera preferences pulled from the user defaults instance
+    @Published public var cameraPreferences: CameraPreferences
+    
+    /// The current camera output size, in pixels. This does not take into account pixel aspect ratio or clean aperture tags.
+    @Published public var imageSize: CGSize = .zero
+    
+    /// Access to the instance of `AVCaptureSession` used
+    @Published public private(set) var session = AVCaptureSession()
+    
+    private let sessionQueue = DispatchQueue(label: "com.walmart.diamond.SessionQ")
+    private let videoDataOutputQueue = DispatchQueue(label: "com.walmart.diamond.VideoDataOutput",
+                                                     qos: .userInitiated,
+                                                     autoreleaseFrequency: .workItem)
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let photoOutput = AVCapturePhotoOutput()
+    
+    private var cancellables = Set<AnyCancellable>()
+    
+    public init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        self.cameraPreferences = userDefaults.currentCameraPreferences
     }
     
-    /// Property indicating whether the scanner is running ( attempting to decode barcodes )
-    public var scannerIsRunning: Bool {
-        viewModel.scannerIsRunning
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
     
-    public func setMacroModeEnabled(_ enabled: Bool){
-        viewModel.cameraManager.update(isMacroMode: enabled ? .on : .off)
-    }
+    // Notifications & Lifecycle variables
     
-    public var isMacroModeEnabled: Bool {
-        viewModel.cameraManager.cameraPreferences.isMacroMode.isOn
-    }
+    private var appLifecycleWired = false
+    private var notificationsWired = false
     
-    public var cameraIdleTimeout: TimeInterval?
+    //  Camera, Lens, Torch, Macro Mode & FOV variables
     
-    // MARK: Internal Properties
+    @Published public var currentDevice: AVCaptureDevice?
     
-    let context: OsirisDataCaptureContext
-    public let viewModel: OsirisScannerViewModel = .init()
+    @Published private var lensPosition: Float = 0.0
     
-    var emptyFrameDetectedTime: TimeInterval?
-    var idleCameraSessionTimer: Timer?
+    @Published public private(set) var torchEnabled: Bool = false
     
-    var config: OsirisConfig? {
-        OsirisApp.shared.getConfig(forContext: context)
-    }
+    private var cameraStartTime: Date = .distantPast
     
-    public var scannerView: OsirisScannerView? {
-        self.view as? OsirisScannerView
-    }
+    private var wantsTorchOnAfterResume = false
+    private var wantsTorchOnAfterLensSwitch = false
+    private var pendingReenableTorch = false
     
-    public func updateVPNEM(_ message: String?){
-        scannerView?.setVPNErrorMessage(message)
-    }
+    private var lastLensSwitch: Date = .distantPast
     
-    var pixelBufferSize: CGSize?
-    var boundingBoxSettings: [BarcodeValue: OsirisBoundingBoxConfig] = [:]
+    public var isUsingMacroCamera = false
     
-    var subscriptions: Set<AnyCancellable> = []
+    public var onCameraSwitch: (() -> Void)?
+    
+    private static let fovMatchRatio:CGFloat = 26.0 / 13.0
+    
+    public var onWillSwitchCamera: (()-> Void)?
 
-    // MARK: Blur Overlay
-
-    private var blurOverlayView: UIVisualEffectView?
+    // Unlike onCameraSwitch, this only reports completion of a macro lens swap.
+    internal var onLensSwitchCompleted: ((Bool) -> Void)?
     
-    // MARK: Lifecycle
+    private var isSwitchingLens = false
     
-    public init(context: OsirisDataCaptureContext) {
-        self.context = context
-        super.init(nibName: nil, bundle: nil)
-    }
+    // Sharpness, smoothness for close up Macro variables
     
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    private var closeEnterLensPos: Float = 0.015
     
-    private var freezeOverlay: UIView?
-    private var waitingForFrameAfterSwap = false
-    private let framesToSkipAfterSwap = 3
-    private var postSwapFrameCount = 0
+    private var sharpnessEMA: Double = 0
+    private let sharpnessAlpha: Double = 1
+    private var lowSharpnessSince: Date?
+    private let blurStableDuration: TimeInterval = 0.12
     
-    public override func viewDidLoad() {
-        super.viewDidLoad()
-        
-        setupViews()
-        scannerView?.applyAppearance(config?.scannerAppearance ?? .init())
-        setupSubscriptions()
-        
-        if let scannerView = scannerView {
-            scannerView.cameraManager = viewModel.cameraManager
+    public var sharpnessEnterThreshold: Double = 18
+    
+    private var isVeryBlur: Bool {
+        if let t = lowSharpnessSince {
+            return Date().timeIntervalSince(t) >= blurStableDuration
         }
-        
-        viewModel.cameraManager.onWillSwitchCamera = { [weak self] in
-            
-            self?.freezePreview()
-            self?.waitingForFrameAfterSwap = true
-            self?.postSwapFrameCount = 0
-        }
-        
+        return false
     }
     
-    public override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        scannerView?.resetZoomToggleState()
-        
-        // Macro mode is now gated by OsirisFlags.macroModeEnabled in loadCameraSettings().
-        // Do not force-disable here — the feature flag is the single source of truth.
-    }
+    public var sharpnessSmoothed: Double {sharpnessEMA}
     
-    private func freezePreview() {
-        guard let container = scannerView?.videoContainerView else { return }
-        osirisMacroTrace("FREEZE begin")
-        freezeOverlay?.removeFromSuperview()
+    /**
+     Configures the capture session and checks necessary permissions before initializing the camera.
+     
+     This function is responsible for setting up the capture session for camera usage and ensuring that the required permissions are granted before configuring the session. It is recommended to call this function before starting camera-related operations.
+     
+     The function performs the following steps:
+     1. Checks and requests necessary permissions for camera usage.
+     2. Asynchronously configures the capture session by invoking the `configureCaptureSession()` method.
+     
+     Calling this function initializes the camera capture session, allowing subsequent camera operations to take place.
+     
+     - Warning: If the required permissions are not granted or if any errors occur during the configuration process, camera-related functionality may not work as expected.
+     
+     - Postcondition: Upon successful execution, the camera capture session is configured and ready for use.
+     */
+    public final func configure() {
+        checkPermissions()
         
-        let overlay = container.snapshotView(afterScreenUpdates: false)!
-        //        ?? {
-        //            let renderer = UIGraphicsImageRenderer(bounds: container.bounds)
-        //            let img = renderer.image { ctx in container.layer.render(in: ctx.cgContext) }
-        //            return UIImageView(image: img)
-        //        }()
-        
-        overlay.frame = container.bounds
-        container.addSubview(overlay)
-        scannerView?.videoPreviewLayer?.connection?.isEnabled = false
-        
-        freezeOverlay = overlay
-        osirisMacroTrace("FREEZE ready")
-    }
-    
-    private func unfreezePreview() {
-        guard let overlay = freezeOverlay else { return }
-        osirisMacroTrace("UNFREEZE begin")
-        scannerView?.videoPreviewLayer?.connection?.isEnabled = true
-        
-        UIView.animate(withDuration: 0.4, animations: {
-            overlay.alpha = 0
-        }) { finished in
-            overlay.removeFromSuperview()
-            self.freezeOverlay = nil //
-            osirisMacroTrace("FADE end, completed=\(finished)")
-        }
-    }
-    
-    private func centerROISharpness(from pixelBuffer: CVPixelBuffer) -> Double {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)}
-        
-        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA,
-              let base = CVPixelBufferGetBaseAddress(pixelBuffer)?.assumingMemoryBound(to: UInt8.self) else {
-            return 0
-        }
-        
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bpr = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        
-        let roiW = width / 4
-        let roiH = height / 4
-        let startX = (width - roiW) / 2
-        let startY = (height - roiH) / 2
-        
-        let step = 2
-        let gw = roiW / step
-        let gh = roiH / step
-        
-        if gw < 3 || gh < 3 {return 0}
-        
-        var gray = Array(repeating: UInt8(0), count: gw * gh)
-        
-        var gy = 0
-        var y = startY
-        while y < startY + roiH {
-            var gx = 0
-            var x = startX
-            while x < startX + roiW {
-                let off = y * bpr + x * 4
-                let b = Double(base[off + 0])
-                let g = Double(base[off + 1])
-                let r = Double(base[off + 2])
-                
-                let l = UInt8(min(255, max(0, Int(0.114*b + 0.587*g + 0.299*r))))
-                gray[gy * gw + gx] = 1
-                gx += 1
-                x += step
-            }
-            gy += 1
-            y += step
-            
-        }
-        
-        var sum: Double = 0
-          var count = 0
-          for j in 1..<(gh-1) {
-            for i in 1..<(gw-1) {
-              let tl = Int(gray[(j-1)*gw + (i-1)]),  t = Int(gray[(j-1)*gw + i]),    tr = Int(gray[(j-1)*gw + (i+1)])
-              let l  = Int(gray[j*gw + (i-1)]),      _c = Int(gray[j*gw + i]),       r  = Int(gray[j*gw + (i+1)])
-              let bl = Int(gray[(j+1)*gw + (i-1)]),  b = Int(gray[(j+1)*gw + i]),    br = Int(gray[(j+1)*gw + (i+1)])
-
-              let gx = (-tl + tr) + (-2*l + 2*r) + (-bl + br)
-              let gy = (-tl - 2*t - tr) + (bl + 2*b + br)
-              sum += Double(gx*gx + gy*gy)
-              count += 1
-            }
-          }
-          if count == 0 { return 0 }
-          // average gradient energy = "sharpness". Low = blurred.
-          return sum / Double(count)
-    }
-    
-    override public func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        stopCamera()
-        
-    }
-    
-    // MARK: Public API
-    
-    /// `startCamera` starts the camera and begins displaying frames in the scanner view.  This also loads all settings configured in the OsirisApp for the OsirisDataCaptureContext associated with this scanner.
-    /// Make sure `OsirisApp.configure` is called before attempting to run the camera
-    public func startCamera() {
-        Logging.log("cameraIsRunning \(cameraIsRunning)", logLevel: .warning)
-        scannerView?.applyAppearance(config?.scannerAppearance ?? .init())
-        
-        cancelIdleCameraSessionTimer()
-
-        // Show blur overlay when starting camera to hide jerky frame transitions
-        showBlurOverlay()
-        
-        self.viewModel.updateConfigAndLoadSettings(withConfig: config)
-    }
-    
-    /// `stopCamera` stops the camera from processing or displaying more frames - this will freeze the current frame.  This automatically stops scanning if it is currently active.
-    public func stopCamera() {
-        Logging.log("cameraIsRunning \(cameraIsRunning)", logLevel: .warning)
-        
-        stopScanning()
-        
-        Task { [ weak self ] in
-            try await self?.stopCameraSession()
-        }
-    }
-    
-    /// `startScanning` starts the barcode decoder and begins processing and scanning the frames from the camera.  If the camera isn't currently running, this will start the camera automatically.
-    public func startScanning() {
-        Logging.log("isScanning \(scannerIsRunning)", logLevel: .warning)
-        
-        cancelIdleCameraSessionTimer()
-        
-        do {
-            try self.viewModel.startScanning()
-            delegate?.didFireEvent(.didStartScanning)
-            if !self.cameraIsRunning {
-                self.startCamera()
-            }
-        } catch {
-            Logging.log("Failed... \(error.localizedDescription)", logLevel: .warning)
-        }
-    }
-    
-    /// `stopScanning` stops the barcode decoder and ignores scanning barcodes from any frames coming in from the camera.
-    /// The active camera still runs when scanning is stopped - only no barcode decoding is attempted.
-    public func stopScanning() {
-        Logging.log("isScanning \(scannerIsRunning)", logLevel: .warning)
-        do {
-            try self.viewModel.stopScanning()
-            delegate?.didFireEvent(.didFinishScanning)
-        } catch {
-            Logging.log("Failed... \(error.localizedDescription)", logLevel: .warning)
-        }
-    }
-    
-    // MARK: Private Helpers
-
-    private func showBlurOverlay() {
-        guard blurOverlayView == nil else { return }
-        let blurEffect = UIBlurEffect(style: .light)
-        let blurView = UIVisualEffectView(effect: blurEffect)
-        blurView.frame = view.bounds
-        blurView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        blurView.alpha = 1.0
-
-        view.addSubview(blurView)
-        self.blurOverlayView = blurView
-    }
-
-    private func hideBlurOverlayWithAnimation() {
-        guard let blurView = blurOverlayView else { return }
-
-        UIView.animate(withDuration: 0.2, animations: {
-            blurView.alpha = 0.0
-        }) { _ in
-            blurView.removeFromSuperview()
-            self.blurOverlayView = nil
-        }
-    }
-    
-    private func cancelIdleCameraSessionTimer() {
-        idleCameraSessionTimer?.invalidate()
-        idleCameraSessionTimer = nil
-    }
-    
-    private func setupViews() {
-        let oScannerView = OsirisScannerView(frame: view.bounds, context: context)
-        self.view = oScannerView
-        oScannerView.videoPreviewLayer = AVCaptureVideoPreviewLayer(session: viewModel.cameraManager.session)
-        oScannerView.captureDevice = viewModel.cameraManager.currentDevice
-        oScannerView.didTapToFocus = { [weak self] touchPoint in
-            guard let self = self else {
-                return
-            }
-            
-            let isFocusEnabled = UserDefaults.standard.currentCameraPreferences.isAutoFocus.isOn
-            
-            if isFocusEnabled {
-                self.focus(at: touchPoint)
-            }
-        }
-        oScannerView.isRecordingDidUpdate = { [weak self] isRecording in
-            guard let config = self?.config else {
-                Logging.log("Missing config...", logLevel: .warning)
-                return
-            }
-            guard let context = self?.context else {
-                Logging.log("Missing context...", logLevel: .warning)
-                return
-            }
-            var extras = config.dynamicConfig.extras
-            extras[OsirisBarcodeKey.benchmarkingIsRunning.rawValue] = isRecording
-            do {
-                try OsirisApp.setDynamicExtras(extras, context: context)
-            } catch {
-                Logging.log("Failed! ... \(error.localizedDescription)", logLevel: .warning)
-            }
-        }
-    }
-    
-    private func setupSubscriptions() {
-        subscriptions = [
-            getCameraStatusSubscription(),
-            getBarcodeSubscription(),
-            getBarcodeBoundingBoxSubscription(),
-            getReticleEnabledSubscription(),
-            getFpsStatsEnabledSubscription()
-            
-        ]
-        
-        if let tapSubscription = getBarcodeBoundingBoxTappedSubscription() {
-            subscriptions.insert(tapSubscription)
-        }
-        
-        setupOsirisConfigSubscription()
-        
-        viewModel.cameraManager
-            .$currentDevice
-            .compactMap { $0 }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] (device: AVCaptureDevice) in
-                guard let self = self else { return }
-                self.scannerView?.captureDevice = device
-                let isMacro = (device.deviceType == .builtInUltraWideCamera)
-                self.scannerView?.isMacroMode = isMacro
-                self.scannerView?.baseZoomFactor = self.viewModel.cameraManager.baselineZoom(for: device)
-            }
-            .store(in: &subscriptions)
-        
-        viewModel.$fpsStatsDisplay
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] text in
-                
-                self?.scannerView?.fpsStatsLabel.text = text
-            }
-            .store(in: &subscriptions)
-    }
-    
-    @MainActor
-    private func startCameraSession() async throws {
-        do {
-            try await self.viewModel.startCamera()
-            delegate?.didFireEvent(.didStartCamera)
-            Logging.log("cameraIsRunning \(cameraIsRunning)", logLevel: .warning)
-        } catch {
-            didReceiveError(error)
-            throw error
-        }
-    }
-    
-    @MainActor
-    private func stopCameraSession() async throws {
-        do {
-            try await self.viewModel.stopCamera()
-//            try OsirisApp.setEnableTorch(false, context: context)
-            delegate?.didFireEvent(.didShutDownCamera)
-            Logging.log("cameraIsRunning \(cameraIsRunning)", logLevel: .warning)
-        } catch {
-            didReceiveError(error)
-            throw error
-        }
-    }
-    
-    private func cameraStatusDidUpdate(toStatus status: CameraManager.Status) {
-        switch status {
-        case .configured:
-            Task { [weak self] in
-                try await self?.startCameraSession()
-            }
-        case .running:
-            let cameraManager: CameraManager = self.viewModel.cameraManager
-            if let scannerView = self.scannerView {
-                self.viewModel.setCameraPreview(withSize: scannerView.videoPreviewLayer?.bounds.size)
-                let frame = scannerView.reticle.frame
-                self.viewModel.setReticle(withFrame: frame)
-            }
-            
-            // Camera status events can fire during teardown re-initialization, briefly turning on
-            // the torch after/when in transition. Delaying dynamic settings application avoids
-            // redundant call. As blur animation is of 0.2 seconds we are adding 0.3 to finish transition.
-            // Increasing 0.3 to 0.5 as low performant devices need more time.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self,
-                      self.viewIfLoaded?.window != nil else { return }
-                try? self.viewModel.loadDynamicSettings(fromConfig: self.config?.dynamicConfig)
-            }
-            cameraManager.setOutputSampleBufferDelegate(to: self, queue: nil)
-            
-            // Hide blur overlay with animation when camera is running
-            hideBlurOverlayWithAnimation()
-        case .unconfigured:
-            break
-        default:
-            break
-        }
-    }
-    
-    private func delegateDidUpdate() {
-        viewModel.didReceiveError = { [weak self] error in
+        sessionQueue.async {
+            self.configureCaptureSession()
             DispatchQueue.main.async {
-                self?.didReceiveError(error)
+                self.wireSessionNotifications()
+                self.wireAppLifeCycleNotifications()
             }
-        }
-        viewModel.didFireEvent = { [weak self] event in
-            DispatchQueue.main.async {
-                self?.processEvent(event)
-            }
+            self.setuplensPosition()
         }
     }
     
-    // MARK: Events
-    
-    private func processEvent(_ event: OsirisEvent) {
-        Logging.log("...Forwarding to OsirisScannerDelegate: \(event)", logLevel: .warning)
-        switch event {
-        case .didStartBenchmarkExport:
-            self.delegate?.didFireEvent(.didStartBenchmarkExport)
-        case .didFinishBenchmarkExport(let error):
-            self.delegate?.didFireEvent(.didFinishBenchmarkExport(error))
-            self.scannerView?.isRecording = false
-        case .didStartScanning:
-            self.delegate?.didFireEvent(.didStartScanning)
-        case .didFinishScanning:
-            self.delegate?.didFireEvent(.didFinishScanning)
-        case .didStartRunningBenchmarking:
-            self.delegate?.didFireEvent(.didStartRunningBenchmarking)
-        case .didFinishRunningBenchmarking:
-            self.delegate?.didFireEvent(.didFinishRunningBenchmarking)
-        case .didEnableAllowBenchmarking:
-            self.delegate?.didFireEvent(.didEnableAllowBenchmarking)
-            self.scannerView?.showRecordingButton = true
-        case .didDisableAllowBenchmarking:
-            self.delegate?.didFireEvent(.didDisableAllowBenchmarking)
-            self.scannerView?.showRecordingButton = false
-        case .didStartCamera:
-            self.delegate?.didFireEvent(.didStartCamera)
-        case .didShutDownCamera:
-            self.delegate?.didFireEvent(.didShutDownCamera)
-        case .didFreezeCameraAfterSingleScan:
-            guard viewModel.decoderManager.scanActionType == .single else {
-                return
-            }
-            self.delegate?.didFireEvent(.didFreezeCameraAfterSingleScan)
+    private func notifyTorchChanged(_ isOn: Bool) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .osirisTorchDidChange, object: nil, userInfo: ["isOn": isOn])
         }
     }
     
-    private func focus(at point: CGPoint) {
+    /// Asynchronously sets the sample buffer delegate on the current `AVCaptureVideoDataOutput` instance
+    ///
+    ///  - Parameters:
+    ///   - delegate:   object that conforms to the protocol AVCaptureVideoDataOutputSampleBufferDelegate
+    ///   - queue:      A dispatch queue on which all sample buffer delegate methods will be called.
+    public func setOutputSampleBufferDelegate(to delegate: AVCaptureVideoDataOutputSampleBufferDelegate,
+                                              queue: DispatchQueue?) {
+        sampleBufferDelegateSemaphore.wait()
+        sessionQueue.async {
+            self.videoOutput.setSampleBufferDelegate(delegate, queue: queue ?? self.videoDataOutputQueue)
+            self.sampleBufferDelegateSemaphore.signal()
+        }
+    }
+    
+    /// Sets the sample buffer delegate to nil
+    public func tearDownOutputSampleBufferDelegate() {
+        sampleBufferDelegateSemaphore.wait()
+        sessionQueue.async {
+            self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
+            self.sampleBufferDelegateSemaphore.signal()
+        }
+    }
+    
+    public func updateCameraPreferences(fromCamera camera: AVCaptureDevice) {
+        do {
+            try camera.lockForConfiguration()
+            
+            cameraPreferences.minExposureBias = camera.minExposureTargetBias
+            cameraPreferences.maxExposureBias = camera.maxExposureTargetBias
+            
+            cameraPreferences.minISO = camera.activeFormat.minISO
+            cameraPreferences.maxISO = camera.activeFormat.maxISO
+            
+            userDefaults.currentCameraPreferences = cameraPreferences
+            
+            camera.unlockForConfiguration()
+        } catch {
+            print("Error locking configuration for updateSettings(forCamera camera: \(error)")
+        }
+    }
+    
+    private func applyModelTuning(){
+        let id = modelIdentifier().uppercased()
         
-        guard let device = viewModel.cameraManager.activeCaptureDevice(),
-              let scannerView = scannerView,
-              let previewLayer = scannerView.videoPreviewLayer else {
+        if id.hasPrefix("IPHONE15,"){
+            closeEnterLensPos = 0.020
+        } else if id.hasPrefix("IPHONE16,") {
+            closeEnterLensPos = 0.025
+        } else if id.hasPrefix("IPHONE17,") {
+           closeEnterLensPos = 0.030
+        }
+        else {
+            closeEnterLensPos = 0.015
+        }
+        
+        print("[MacroMode] model: \(id) closeEnterLensPos: \(closeEnterLensPos)")
+    }
+    
+    private func configureCaptureSession() {
+        guard getStatus() == .unconfigured else { return }
+        
+        defer {
+            session.commitConfiguration()
+        }
+        
+        session.beginConfiguration()
+        
+        guard let camera = configureCaptureDevice() else {
+            set(error: .cameraUnavailable)
+            setStatus(.failed)
             return
         }
         
-        scannerView.showFocusSquare(at: point)
+        currentDevice = camera
+        applyModelTuning()
+        persistActiveDevice(camera)
         
-        let focusPoint = previewLayer.captureDevicePointConverted(fromLayerPoint: point)
+        session.addOutput(photoOutput)
+        session.addOutput(videoOutput)
+        
+        refreshCameraSettings(forCamera: camera)
+        
+        // Set Camera Device to use for updating camera settings later
+        updateCameraPreferences(fromCamera: camera)
+        
+        setStatus(.configured)
+    }
+    
+    internal func updateCaptureDevice(to captureDevice: AVCaptureDevice?) {
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        
+        guard
+            let currentInput = session.inputs.first as? AVCaptureDeviceInput,
+            let newDevice = captureDevice
+        else { return }
         
         do {
-            try device.lockForConfiguration()
+            let newInput = try AVCaptureDeviceInput(device: newDevice)
             
-            if device.isFocusPointOfInterestSupported {
-                device.focusPointOfInterest = focusPoint
-                if device.isFocusModeSupported(.autoFocus) {
-                    device.focusMode = .autoFocus
+            session.removeInput(currentInput)
+            if session.canAddInput(newInput) {
+                session.addInput(newInput)
+                
+                self.currentDevice = newDevice
+                self.persistActiveDevice(newDevice)
+                self.updateCameraPreferences(fromCamera: newDevice)
+                // Need to refresh settings after adding cameraInput
+                refreshCameraSettings(forCamera: newDevice)
+                
+                // Set Camera Device to use for updating camera settings later
+                updateCameraPreferences(fromCamera: newDevice)
+                
+                let captureDevices = Self.discoverVideoCaptureDevices()
+                
+            } else {
+                print("Cannot add new camera input.")
+                // Re-add the old input if the new one can't be added
+                session.addInput(currentInput)
+            }
+        } catch {
+            print("Error creating camera input: \(error)")
+            // Re-add the old input in case of error
+            session.addInput(currentInput)
+        }
+        
+        DispatchQueue.main.async {
+            self.onCameraSwitch?()
+        }
+    }
+    
+    // Refreshes camera settings
+    // This ensures the barcode reticle is displayed properly
+    internal func refreshCameraSettings(forCamera camera: AVCaptureDevice) {
+        
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.videoSettings =
+        [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        
+        let videoConnection = videoOutput.connection(with: .video)
+        videoConnection?.videoOrientation = .portrait
+        
+        // Enable video stabilization if setting is enabled
+        if let connection = videoConnection, connection.isVideoStabilizationSupported {
+            if userDefaults.videoStabilizationEnabled {
+                connection.preferredVideoStabilizationMode = .auto
+            } else {
+                connection.preferredVideoStabilizationMode = .off
+            }
+        }
+        
+        photoOutput.isHighResolutionCaptureEnabled = true
+        
+        do {
+            try updateImageDimensions(forCamera: camera)
+            try camera.lockForConfiguration()
+            
+            // Set frame rates from UserDefaults, or use default if not set
+            let defaultFrameRate: Float64 = 30.0
+            let minFrameRate = userDefaults.activeVideoMinFrameRate ?? defaultFrameRate
+            let maxFrameRate = userDefaults.activeVideoMaxFrameRate ?? defaultFrameRate
+            
+            // Validate against camera's supported frame rate ranges
+            let supportedRanges = camera.activeFormat.videoSupportedFrameRateRanges
+            var validMinFrameRate = minFrameRate
+            var validMaxFrameRate = maxFrameRate
+            
+            // Find a supported range that contains our desired frame rates, or use default of 30 FPS
+            var foundValidRange = false
+            for range in supportedRanges {
+                if minFrameRate >= range.minFrameRate && maxFrameRate <= range.maxFrameRate {
+                    foundValidRange = true
+                    break
                 }
             }
             
-            if device.isExposurePointOfInterestSupported {
-                device.exposurePointOfInterest = focusPoint
-                device.exposureMode = .autoExpose
+            if !foundValidRange {
+                // Fallback to default if no ranges available
+                validMinFrameRate = defaultFrameRate
+                validMaxFrameRate = defaultFrameRate
+                Self.logger.warning("No supported frame rate ranges found. Using default: \(defaultFrameRate) FPS")
+            }
+            
+            // Convert frame rates to CMTime (frame duration = 1 / frame rate)
+            // Note: activeVideoMinFrameDuration = shortest duration = highest frame rate (maxFrameRate)
+            //       activeVideoMaxFrameDuration = longest duration = lowest frame rate (minFrameRate)
+            camera.activeVideoMinFrameDuration = CMTime(seconds: 1.0 / validMaxFrameRate, preferredTimescale: 600)
+            camera.activeVideoMaxFrameDuration = CMTime(seconds: 1.0 / validMinFrameRate, preferredTimescale: 600)
+            
+            // Enable low light boost if user setting is enabled and device supports it
+            if userDefaults.shouldTryToEnableLowLightCapture {
+                if camera.isLowLightBoostSupported {
+                    camera.automaticallyEnablesLowLightBoostWhenAvailable = true
+                    Self.logger.info("Low light boost enabled for camera")
+                } else {
+                    Self.logger.info("Low light boost not supported on this device")
+                }
+            } else {
+                // NOTE: Need this check because we can only turn low light boost on and off on specific devices
+                if camera.isLowLightBoostSupported {
+                    camera.automaticallyEnablesLowLightBoostWhenAvailable = false
+                }
+            }
+            
+            camera.unlockForConfiguration()
+        } catch {
+            ErrorLogger.log("bufferSize setting error: \(error)")
+        }
+        
+    }
+    
+    /// Validates that the given frame rates are supported by the camera's active format
+    /// - Parameters:
+    ///   - minFrameRate: Minimum frame rate in FPS
+    ///   - maxFrameRate: Maximum frame rate in FPS
+    ///   - camera: The camera device to check
+    /// - Returns: true if the frame rates are supported, false otherwise
+    private func validateFrameRates(minFrameRate: Float64, maxFrameRate: Float64, forCamera camera: AVCaptureDevice) -> Bool {
+        let supportedRanges = camera.activeFormat.videoSupportedFrameRateRanges
+        
+        // Check if the requested frame rates fall within any supported range
+        for range in supportedRanges {
+            if minFrameRate >= range.minFrameRate && maxFrameRate <= range.maxFrameRate {
+                return true
+            }
+        }
+        
+        Self.logger.error("Frame rates (min: \(minFrameRate) FPS, max: \(maxFrameRate) FPS) are not supported. Supported ranges: \(supportedRanges.map { "[\($0.minFrameRate)-\($0.maxFrameRate)]" }.joined(separator: ", "))")
+        return false
+    }
+    
+    /// Sets the active video frame rate for the camera
+    /// - Parameters:
+    ///   - minFrameRate: Optional minimum frame rate in FPS. If provided, must be <= maxFrameRate (or existing max if maxFrameRate is nil)
+    ///   - maxFrameRate: Optional maximum frame rate in FPS. If provided, must be >= minFrameRate (or existing min if minFrameRate is nil)
+    /// - Returns: true if the frame rates were successfully set, false otherwise
+    @discardableResult
+    public func setFrameRate(minFrameRate: Float64? = nil, maxFrameRate: Float64? = nil) -> Bool {
+        // Return early if neither is provided
+        guard minFrameRate != nil || maxFrameRate != nil else {
+            return false
+        }
+        
+        // Get existing values from UserDefaults
+        let existingMin = userDefaults.activeVideoMinFrameRate
+        let existingMax = userDefaults.activeVideoMaxFrameRate
+        
+        // Determine the values to use
+        let newMin = minFrameRate ?? existingMin
+        let newMax = maxFrameRate ?? existingMax
+        
+        // Validate: if only one is provided, check against the other value
+        if let min = newMin, let max = newMax {
+            // Both values are present, ensure min <= max
+            if min > max {
+                Self.logger.error("Invalid frame rate: minFrameRate (\(min) FPS) must be <= maxFrameRate (\(max) FPS)")
+                return false
+            }
+        } else if let min = newMin, let max = existingMax {
+            // Only min provided, check against existing max
+            if min > max {
+                Self.logger.error("Invalid frame rate: minFrameRate (\(min) FPS) must be <= existing maxFrameRate (\(max) FPS)")
+                return false
+            }
+        } else if let min = existingMin, let max = newMax {
+            // Only max provided, check against existing min
+            if min > max {
+                Self.logger.error("Invalid frame rate: existing minFrameRate (\(min) FPS) must be <= maxFrameRate (\(max) FPS)")
+                return false
+            }
+        }
+        
+        // Save to UserDefaults
+        if let min = minFrameRate {
+            userDefaults.activeVideoMinFrameRate = min
+        }
+        if let max = maxFrameRate {
+            userDefaults.activeVideoMaxFrameRate = max
+        }
+        
+        // Apply to camera if it's configured and we have a device
+        guard let camera = currentDevice, let finalMin = newMin, let finalMax = newMax else {
+            return true // Saved to UserDefaults, will apply when camera is configured
+        }
+        
+        // Validate against camera's supported frame rate ranges
+        guard validateFrameRates(minFrameRate: finalMin, maxFrameRate: finalMax, forCamera: camera) else {
+            return false
+        }
+        
+        // Convert frame rates to CMTime (frame duration = 1 / frame rate)
+        // Note: activeVideoMinFrameDuration = shortest duration = highest frame rate (maxFrameRate)
+        //       activeVideoMaxFrameDuration = longest duration = lowest frame rate (minFrameRate)
+        let minFrameDuration = CMTime(seconds: 1.0 / finalMax, preferredTimescale: 600)
+        let maxFrameDuration = CMTime(seconds: 1.0 / finalMin, preferredTimescale: 600)
+        
+        if getStatus() == .running || getStatus() == .configured {
+            sessionQueue.async {
+                do {
+                    try camera.lockForConfiguration()
+                    camera.activeVideoMinFrameDuration = minFrameDuration
+                    camera.activeVideoMaxFrameDuration = maxFrameDuration
+                    camera.unlockForConfiguration()
+                    Self.logger.info("Successfully set frame rates: min=\(finalMin) FPS, max=\(finalMax) FPS")
+                } catch {
+                    Self.logger.error("Failed to set frame rate: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        return true
+    }
+    
+    internal func activeCaptureDevice() -> AVCaptureDevice? {
+        guard let cameraDevice = captureDeviceById(with: cameraPreferences.captureDeviceId) else {
+            return nil
+        }
+        
+        return cameraDevice
+    }
+    
+    private func configureCaptureDevice() -> AVCaptureDevice? {
+        
+        guard let cameraDevice = captureDeviceById(with: cameraPreferences.captureDeviceId) else {
+            set(error: .cameraUnavailable)
+            setStatus(.failed)
+            return nil
+        }
+        
+        do {
+            let cameraInput = try AVCaptureDeviceInput(device: cameraDevice)
+            guard session.canAddInput(cameraInput) == true else {
+                set(error: .cannotAddInput)
+                setStatus(.failed)
+                return nil
+            }
+            
+            session.addInput(cameraInput)
+            
+            return cameraDevice
+        } catch {
+            set(error: .createCaptureInput(error))
+            setStatus(.failed)
+            return nil
+        }
+    }
+    
+    internal func set(error: CameraError?) {
+        DispatchQueue.main.async {
+            self.error = error
+        }
+    }
+    
+    private func checkPermissions() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .notDetermined:
+            sessionQueue.suspend()
+            AVCaptureDevice.requestAccess(for: .video) { authorized in
+                if !authorized {
+                    self.setStatus(.unauthorized)
+                    self.set(error: .deniedAuthorization)
+                }
+                self.sessionQueue.resume()
+            }
+        case .restricted:
+            setStatus(.unauthorized)
+            set(error: .restrictedAuthorization)
+        case .denied:
+            setStatus(.unauthorized)
+            set(error: .deniedAuthorization)
+        case .authorized:
+            break
+        @unknown default:
+            setStatus(.unauthorized)
+            set(error: .unknownAuthorization)
+        }
+    }
+    
+    private func setStatus(_ status: Status) {
+        statusSemaphore.wait()
+        defer {
+            statusSemaphore.signal()
+        }
+        self.status = status
+    }
+    
+    private func getStatus() -> Status {
+        statusSemaphore.wait()
+        defer {
+            statusSemaphore.signal()
+        }
+        return self.status
+    }
+    
+    /**
+     Captures a photo using the configured capture session and outputs the result to the designated AVCapturePhotoCaptureDelegate.
+     
+     This function captures a photo using the camera's configured capture session. It first checks whether the camera session is in the running state, and if not, it sets an error indicating that the camera is unavailable. If the session is running, the function asynchronously configures and captures a photo using AVCapturePhotoSettings.
+     
+     The function performs the following steps:
+     1. Checks if the camera session is in the running state. If not, it sets an error indicating that the camera is unavailable and exits.
+     2. Asynchronously configures AVCapturePhotoSettings for the capture process.
+     3. Sets properties such as high-resolution photo enablement, depth data delivery, and auto red-eye reduction.
+     4. Captures a photo using the configured AVCapturePhotoOutput and delegates the capture process to the object conforming to AVCapturePhotoCaptureDelegate (usually self).
+     5. Assumes that the same photo settings are reused for the next call and prepares the photo settings array accordingly.
+     
+     - Note: The captured photo result and delegate callbacks are handled by the object implementing AVCapturePhotoCaptureDelegate.
+     
+     - Precondition: The capture session must be in the running state before calling this function.
+     
+     - Warning: If the capture session is not running or if any errors occur during the capture process, the function sets an error and the photo capture may not occur as expected.
+     */
+    
+    public func capturePhoto() {
+        guard getStatus() == .running else {
+            set(error: .cameraUnavailable)
+            setStatus(.failed)
+            return
+        }
+        
+        sessionQueue.async {
+            let photoSettings = AVCapturePhotoSettings()
+            
+            photoSettings.isHighResolutionPhotoEnabled = true
+            //      photoSettings.photoQualityPrioritization = .quality
+            photoSettings.isDepthDataDeliveryEnabled = self.photoOutput.isDepthDataDeliveryEnabled
+            photoSettings.isAutoRedEyeReductionEnabled = false
+            
+            self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
+            
+            // Assume capturePhoto reuses the same photoSettings for the next call
+            self.photoOutput.setPreparedPhotoSettingsArray([photoSettings])
+        }
+    }
+    
+    /// Starts an AVCaptureSession instance running.
+    /// And sets the current status to `.running`
+    
+    public func startSession() {
+        if self.session.isRunning { return }
+        self.cameraStartTime = Date()
+        
+        sessionQueue.async {
+            self.session.startRunning()
+            
+            if let device = self.currentDevice {
+                do {
+                    try device.lockForConfiguration()
+                    device.videoZoomFactor = self.baselineZoom(for: device)
+                    device.unlockForConfiguration()
+                }
+                catch{
+                    print("Failed to setbaseline")
+                }
+                
+            }
+            
+            DispatchQueue.main.async {
+                self.onCameraSwitch?()
+            }
+            self.setStatus(.running)
+        }
+    }
+    
+    private func wireSessionNotifications() {
+        guard !notificationsWired else { return }
+        notificationsWired = true
+        
+        ////         Extra check if needed
+        //        NotificationCenter.default.addObserver(
+        //            self,
+        //            selector: #selector(sessionDidStartRunning),
+        //            name: .AVCaptureSessionDidStartRunning,
+        //            object: session
+        //        )
+        //
+        ////         Extra check if needed
+        //        NotificationCenter.default.addObserver(
+        //            self,
+        //            selector: #selector(sessionInterruptionEnded),
+        //            name: .AVCaptureSessionInterruptionEnded,
+        //            object: session
+        //        )
+    }
+    
+    
+    ////     Extra check if needed
+    //    @objc private func sessionDidStartRunning() {
+    //
+    //        if pendingReenableTorch && wantsTorchOnAfterResume  {
+    //            reenableTorchWithBackoff()
+    //            pendingReenableTorch = false
+    //        }
+    //    }
+    //
+    ////     Extra check if needed
+    //    @objc private func sessionInterruptionEnded() {
+    //        resetTorchIfNeeded(delay: 1, retries: 2)
+    //    }
+    
+    
+    private func wireAppLifeCycleNotifications() {
+        guard !appLifecycleWired else { return }
+        appLifecycleWired = true
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(appWillResignActive),
+                                               name: UIApplication.willResignActiveNotification,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(appDidBecameActive),
+                                               name: UIApplication.didBecomeActiveNotification,
+                                               object: nil)
+    }
+    
+    
+    @objc private func appWillResignActive() {
+        wantsTorchOnAfterResume = torchEnabled
+        if torchEnabled {
+            try? toggleTorch(.off)
+        }
+    }
+    
+    @objc func appDidBecameActive() {
+        guard wantsTorchOnAfterResume else { return }
+        if status == .running {
+            reenableTorchWithBackoff()
+        }
+        else {
+            pendingReenableTorch = true
+        }
+    }
+    
+    private func reenableTorchWithBackoff(delay: TimeInterval = 1, retries:Int = 2) {
+        resetTorchIfNeeded(delay: delay, retries: retries)
+        wantsTorchOnAfterResume = false
+    }
+    
+    private func reenableTorchAfterLensSwitch(){
+        if status == .running {
+            try? toggleTorch(.on)
+        } else {
+            pendingReenableTorch = true
+        }
+        wantsTorchOnAfterLensSwitch = false
+    }
+    
+    public func resetTorchIfNeeded(delay: TimeInterval = 1, retries:Int = 2) {
+        func attempt(_ remaining: Int) {
+            sessionQueue.asyncAfter(deadline: .now() + (remaining == retries ? delay: 0)) { [weak self] in
+                
+                guard let self = self else {return}
+                
+                try? toggleTorch(.on)
+                
+                guard self.status == .running,
+                      self.torchEnabled else {return}
+                
+                let device = self.currentDevice ?? self.captureDeviceById(with: self.cameraPreferences.captureDeviceId)
+                guard let dev = device, dev.hasTorch else {return}
+                
+                do {
+                    try dev.lockForConfiguration()
+                    defer {dev.unlockForConfiguration()}
+                    
+                    if dev.torchMode != .on {
+                        
+                        if dev.isTorchModeSupported(.on) {
+                            try dev.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+                            
+                        } else {
+                            dev.torchMode = .on
+                        }
+                    }
+                }
+                catch {
+                    print("Torch restart failed: \(error)")
+                }
+                
+                if dev.torchMode != .on, remaining > 0 {
+                    attempt(remaining - 1)
+                }
+            }
+        }
+        attempt(retries)
+    }
+    
+    /// Stops an AVCaptureSession instance running.
+    /// First checks that the satus is running, otherwise it will stop early
+    /// Upcon completion set the status to `.configured` which means it's ready to go
+    public func stopSession() {
+        guard getStatus() == .running else { return }
+        imageData = nil
+        let sem = DispatchSemaphore(value: 0)
+        sessionQueue.async {
+            self.session.stopRunning()
+            self.setStatus(.configured)
+            sem.signal()
+        }
+        sem.wait()
+    }
+    
+    // MARK: - Private
+    func setAutoFocus(forCamera device: AVCaptureDevice, enable: Bool, focusDistance: AVCaptureDevice.AutoFocusRangeRestriction = .near) {
+        do {
+            try device.lockForConfiguration()
+            
+            if enable {
+                // Enable continuous auto-focus
+                if device.isFocusModeSupported(.continuousAutoFocus) {
+                    device.focusMode = .continuousAutoFocus
+                }
+                
+                if device.isAutoFocusRangeRestrictionSupported {
+                    device.autoFocusRangeRestriction = focusDistance
+                }
+                
+//                if device.isSmoothAutoFocusSupported {
+//                    device.isSmoothAutoFocusEnabled = true
+//                }
+                
+                // Enable continuous auto-exposure
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+            } else {
+                // Disable auto-focus by locking at current lens position or a default
+                let currentLens = device.lensPosition
+                if device.isFocusModeSupported(.locked) {
+                    if device.isLockingFocusWithCustomLensPositionSupported {
+                        device.setFocusModeLocked(lensPosition: currentLens)
+                    } else {
+                        device.focusMode = .locked
+                        print("Manual focus locked (custom lens position not supported)")
+                    }
+                }
+                
+                // Optionally also lock exposure if desired
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+                
+                if device.isAutoFocusRangeRestrictionSupported {
+                    device.autoFocusRangeRestriction = .none
+                }
             }
             
             device.unlockForConfiguration()
         } catch {
-            print("Error focusing: \(error)")
+            print("Error configuring camera: \(error)")
+        }
+    }
+    
+    private func setuplensPosition() {
+        
+        $lensPosition
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] position in
+                guard let self = self else { return }
+                
+            }
+        
+            .store(in: &cancellables)
+        
+        observeLensPosition()
+    }
+    
+    private var lensKvoCancellables = Set<AnyCancellable>()
+    
+    private func observeLensPosition() {
+        
+        lensKvoCancellables.removeAll()
+        
+        guard let device = currentDevice else {return}
+        
+        device.publisher(for: \.lensPosition, options: [.initial, .new])
+            .receive(on: DispatchQueue.main)
+            .dropFirst()
+            .sink { [weak self] position in
+                self?.evaluateMacroSwitch(for: position)
+            }
+            .store(in: &lensKvoCancellables)
+    }
+    
+    // MARK: MACRO MODE
+    
+    private func shouldSwitchCamera() -> Bool {
+        Date().timeIntervalSince(lastLensSwitch) > 2.0
+    }
+    
+    public func update(isMacroMode mode: CameraPreferences.MacroMode){
+        cameraPreferences.isMacroMode = mode
+        userDefaults.currentCameraPreferences = cameraPreferences
+        
+        if !mode.isOn, isUsingMacroCamera {
+            switchToStandardCamera()
         }
         
-        // Go back to auto focus after 2 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        if mode.isOn {
+            observeLensPosition()
+        } else {
+            lensKvoCancellables.removeAll()
+            lowSharpnessSince = nil
+        }
+    }
+    
+    // Sharpness Detection for Close up Macro
+    
+    private func modelIdentifier()-> String {
+        var info = utsname(); uname(&info)
+        return withUnsafePointer(to: &info.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+    }
+    
+    public func updateSharpnessScore(_ score: Double) {
+        let s = max(0, score)
+        
+        sharpnessEMA = (sharpnessEMA == 0) ? s : (sharpnessAlpha * s + (1 - sharpnessAlpha) * sharpnessEMA)
+        if sharpnessEMA < sharpnessEnterThreshold {
+            if lowSharpnessSince == nil {
+                lowSharpnessSince = Date()
+            }
+        } else {
+            lowSharpnessSince = nil
+        }
+    }
+    
+    private func evaluateMacroSwitch(for position: Float) {
+        
+        guard cameraPreferences.isMacroMode.isOn else {
+            return
+        }
+        guard !isSwitchingLens else { return }
+        
+        let backCameras = Self.discoverVideoCaptureDevices(position: .back)
+        let hasTelephoto = backCameras.contains { $0.deviceType == .builtInTelephotoCamera }
+        
+        guard hasTelephoto else {
+            print(" Dual Camera detected - Macro Disabled")
+            return
+        }
+        
+        let elapsed = Date().timeIntervalSince(cameraStartTime)
+        guard elapsed > 2.0 else {
+            
+            DispatchQueue.main.async {
+                self.onCameraSwitch?()
+            }
+            print("Skipping macro mode switch - camera not yet ready / waiting for lens to stabilize")
+            return
+        }
+        
+        let isClose = position <= closeEnterLensPos
+        let isFar = position > 0.825
+        let isMacro = currentDevice?.deviceType == .builtInUltraWideCamera
+        
+        let shouldEnterMacro = (isClose && isVeryBlur) && !isMacro
+        let shouldExitMacro = (isFar && isMacro)
+        
+        guard currentDevice?.position == .back else {
+            print("Macro Mode not allowed on Front Camera")
+            return
+        }
+        guard shouldSwitchCamera() else { return }
+        
+        if shouldEnterMacro {
+            print("Close Object detected - switching to Macro")
+            lastLensSwitch = Date()
+            switchToMacroCamera()
+        } else if shouldExitMacro {
+            print("Subject moved away - switching to Standard")
+            lastLensSwitch = Date()
+            switchToStandardCamera()
+        }
+        
+    }
+    
+    private func switchToMacroCamera() {
+        switchLens(useMacro: true)
+    }
+
+    private func switchToStandardCamera() {
+        switchLens(useMacro: false)
+    }
+
+    private func switchLens(useMacro: Bool) {
+        // Prepare the covering view before changing inputs. Never wait for main
+        // synchronously from sessionQueue: stopSession already waits on that queue.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.switchLens(useMacro: useMacro)
+            }
+            return
+        }
+        guard !isSwitchingLens, let previousDevice = currentDevice else { return }
+        // Macro OFF must also restore the wide camera while the session is stopped.
+        guard !useMacro || session.isRunning else { return }
+
+        let deviceType: AVCaptureDevice.DeviceType = useMacro ? .builtInUltraWideCamera : .builtInWideAngleCamera
+        guard previousDevice.deviceType != deviceType,
+              let newDevice = Self.discoverVideoCaptureDevices(position: .back)
+                .first(where: { $0.deviceType == deviceType }) else { return }
+
+        let requestedZoom = useMacro
+            ? previousDevice.videoZoomFactor * Self.fovMatchRatio
+            : previousDevice.videoZoomFactor / Self.fovMatchRatio
+
+        osirisMacroTrace(useMacro ? "REQUEST normal -> macro" : "REQUEST macro -> normal")
+        isSwitchingLens = true
+        wantsTorchOnAfterLensSwitch = torchEnabled
+        if session.isRunning { onWillSwitchCamera?() }
+        switchCaptureDevice(to: newDevice, replacing: previousDevice, zoomFactor: requestedZoom)
+    }
+
+    private func switchCaptureDevice(to newDevice: AVCaptureDevice,
+                                     replacing previousDevice: AVCaptureDevice,
+                                     zoomFactor: CGFloat) {
+        osirisMacroTrace("SWAP queued: \(newDevice.deviceType.rawValue)")
+        sessionQueue.async {
+            osirisMacroTrace("SWAP begin")
+            guard self.session.isRunning || newDevice.deviceType == .builtInWideAngleCamera,
+                  let oldInput = self.session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+                    .first(where: { $0.device.hasMediaType(.video) }),
+                  oldInput.device.uniqueID == previousDevice.uniqueID else {
+                self.finishLensSwitch(succeeded: false)
+                return
+            }
+
+            let newInput: AVCaptureDeviceInput
             do {
-                try device.lockForConfiguration()
-                if device.isFocusModeSupported(.continuousAutoFocus){
-                    device.focusMode = .continuousAutoFocus
-                }
-                if device.isAutoFocusRangeRestrictionSupported {
-                    device.autoFocusRangeRestriction = .near
-                }
-                device.unlockForConfiguration()
+                // Construct first, so a creation failure leaves the old camera intact.
+                newInput = try AVCaptureDeviceInput(device: newDevice)
             } catch {
-                print("Failed to restore focus: \(error)")
+                osirisMacroTrace("SWAP failed: \(error.localizedDescription)")
+                self.finishLensSwitch(succeeded: false)
+                return
             }
-        }
-    }
-    
-    // MARK: Error Handling
-    
-    private func didReceiveError(_ error: Error) {
-        var logLevel: LoggingLevel = .trace
-        switch error {
-        case let error as OsirisBarcodeError:
-            switch error {
-            case .barcodeNotFound:
-                break
-            default:
-                logLevel = .warning
-            }
-        case let error as OsirisScannerError:
-            switch error {
-            case .cameraSessionNotReady, .cameraSessionHasNotStarted:
-                break
-            case .decodingNotReady:
-                break
-            default:
-                logLevel = .warning
-            }
-        default:
-            logLevel = .warning
-        }
-        if logLevel == .warning {
-            delegate?.didReceiveError(error)
-        }
-        Logging.log("... Error: \(error.localizedDescription)", logLevel: logLevel)
-    }
-    
-    // MARK: Deinit
-    
-    deinit {
-        Logging.log("...")
-        NotificationCenter.default.removeObserver(self)
-    }
-    
-}
 
-// MARK: Subscriptions
-extension OsirisScannerViewController {
-    
-    // MARK: Private Subscriptions
-    
-    private func getCameraStatusSubscription() -> AnyCancellable {
-        viewModel.$cameraStatus.removeDuplicates()
-            .combineLatest(viewModel.sessionManager.$shouldStartCameraSession.removeDuplicates())
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] status, _ in
-                self?.cameraStatusDidUpdate(toStatus: status)
+            self.session.beginConfiguration()
+            self.session.removeInput(oldInput)
+            let installed = self.session.canAddInput(newInput)
+            if installed {
+                self.session.addInput(newInput)
+                self.currentDevice = newDevice
+                self.persistActiveDevice(newDevice)
+                self.updateCameraPreferences(fromCamera: newDevice)
+                self.refreshCameraSettings(forCamera: newDevice)
+            } else if self.session.canAddInput(oldInput) {
+                self.session.addInput(oldInput)
+                osirisMacroTrace("SWAP failed; restored previous input")
+            } else {
+                self.currentDevice = nil
+                osirisMacroTrace("SWAP failed; could not restore previous input")
             }
-        
-    }
-    
-    private func getBarcodeSubscription() -> AnyCancellable {
-        viewModel.barcodeManager.$barcodes
-            .receive(on: DispatchQueue.main)
-            .sink(receiveValue: { [weak self] barcodes in
-                if let barcode = barcodes.last {
-                    self?.delegate?.didDetectBarcode(barcode)
-                    self?.scannerView?.reticle.toggleReticleColor()
-                }
-            })
-    }
-    
-    private func getBarcodeBoundingBoxTappedSubscription() -> AnyCancellable? {
-        scannerView?.boundingBoxes.$foundBarcodeBox
-            .receive(on: DispatchQueue.main)
-            .sink(receiveValue: { [weak self] foundBarcodeBox in
-                guard let self, let foundBarcodeBox else {
-                    return
-                }
-                
-                let selectedBarcode = foundBarcodeBox.barcode
-                self.delegate?.didTapDetectedBarcodeBoundingBox(selectedBarcode, setBoundingBoxSettings: { settings in
-                    self.boundingBoxSettings[selectedBarcode.value] = settings
-                    self.scannerView?.boundingBoxes.updateBarcodes(self.viewModel.barcodeManager.barcodeBoundingBoxes, customSettings: self.boundingBoxSettings)
-                })
-            })
-    }
-    
-    private func getBarcodeBoundingBoxSubscription() -> AnyCancellable {
-        viewModel.barcodeManager.$barcodeBoundingBoxes
-            .receive(on: DispatchQueue.main)
-            .sink(receiveValue: { [weak self] barcodeBoundingBoxes in
-                for box in barcodeBoundingBoxes {
-                    guard let previewLayer = self?.scannerView?.videoPreviewLayer,
-                          let pixelBufferSize = self?.pixelBufferSize,
-                          !box.barcode.quadPoints.isEmpty else
-                    {
-                        self?.scannerView?.boundingBoxes.resetQuadPoints()
-                        continue
-                    }
-                    
-                    if !box.barcode.quadPoints.isEmpty {
-                        self?.scannerView?.boundingBoxes.registerQuadPoints(
-                            forBarcodeValue: box.barcode.value,
-                            pixelBufferPoints: box.barcode.quadPoints,
-                            previewLayer: previewLayer,
-                            videoOrientation: previewLayer.connection?.videoOrientation ?? .portrait,
-                            isMirrored: false, // Should handle front camera mirroring
-                            pixelBufferSize: pixelBufferSize,
-                            videoZoomFactor: 1.0 // To-be supported..
-                        )
-                    } else {
-                        self?.scannerView?.boundingBoxes.resetQuadPoints()
-                    }
-                }
-                
-                // Draw Default Bounding Boxes
-                self?.scannerView?.boundingBoxes.updateBarcodes(barcodeBoundingBoxes, customSettings: self?.boundingBoxSettings ?? [:])
-                self?.delegate?.didDetectBarcodes(barcodeBoundingBoxes.map(\.barcode), setBoundingBoxesSettings: { settings in
-                    // Re-draw customized boxes
-                    // 1. Merging new settings into existing settings
-                    for (key, newValue) in settings {
-                        // Update or insert the key-value pair
-                        self?.boundingBoxSettings[key] = newValue
-                    }
-                    
-                    // 2. Pass down `boundingBoxSettings` to bounding boxes manager to draw using the given settings.
-                    self?.scannerView?.boundingBoxes.updateBarcodes(barcodeBoundingBoxes, customSettings: self?.boundingBoxSettings ?? [:])
-                })
-            })
-    }
-    
-    private func getReticleEnabledSubscription() -> AnyCancellable {
-        viewModel.decoderManager.$reticleEnabled
-            .receive(on: DispatchQueue.main)
-            .sink(receiveValue: { [weak self] isEnabled in
-                self?.scannerView?.reticle(shouldHide: !isEnabled)
-            })
-    }
-    
-    // to subscribe fpsStats enablement status
-    private func getFpsStatsEnabledSubscription() -> AnyCancellable {
-        viewModel.decoderManager.$fpsStatsEnabled
-            .receive(on: DispatchQueue.main)
-            .sink(receiveValue: { [weak self] isEnabled in
-                self?.scannerView?.fpsStats(shouldHide: !isEnabled)
-            })
-    }
-    
-    private func setupOsirisConfigSubscription() {
-        NotificationCenter.default.publisher(for: .osirisConfigDidUpdate)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                Task { @MainActor in
-                    do {
-                        try await self?.stopCameraSession()
-                        self?.startCamera()
-                        Logging.log("Success... did start camera session", logLevel: .warning)
-                    } catch {
-                        Logging.log("Failed... \(error)", logLevel: .warning)
-                        Logging.log("Updating Config anyway...", logLevel: .warning)
-                        self?.viewModel.updateConfig(withConfig: self?.config)
-                    }
-                }
-            }
-            .store(in: &subscriptions)
-    }
-}
 
-extension OsirisScannerViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
-    private func checkIdleState(_ firstEmptyScan: TimeInterval) {
-        if isCameraIdle(firstEmptyScan) {
-            delegate?.cameraIdleDetected()
+            osirisMacroTrace("COMMIT begin")
+            self.session.commitConfiguration()
+            osirisMacroTrace("COMMIT end")
+
+            if installed {
+                // Apply zoom in queue order after the input swap, without sleeping
+                // or locking the camera from the main thread.
+                do {
+                    try newDevice.lockForConfiguration()
+                    newDevice.videoZoomFactor = min(
+                        max(zoomFactor, newDevice.minAvailableVideoZoomFactor),
+                        newDevice.maxAvailableVideoZoomFactor
+                    )
+                    newDevice.unlockForConfiguration()
+                    osirisMacroTrace("ZOOM applied")
+                } catch {
+                    osirisMacroTrace("ZOOM failed: \(error.localizedDescription)")
+                }
+            }
+            self.finishLensSwitch(succeeded: installed)
         }
     }
-    
-    private func isCameraIdle(_ firstEmptyScan: TimeInterval) -> Bool {
-        guard let cameraIdleTimeout = cameraIdleTimeout else {
-            return false
+
+    private func finishLensSwitch(succeeded: Bool) {
+        DispatchQueue.main.async {
+            self.isUsingMacroCamera = self.currentDevice?.deviceType == .builtInUltraWideCamera
+            self.isSwitchingLens = false
+            self.observeLensPosition()
+            let running = self.session.isRunning
+            osirisMacroTrace("SWAP completed, success=\(succeeded)")
+            self.onLensSwitchCompleted?(succeeded && running)
+            self.onCameraSwitch?()
+
+            if running, UIApplication.shared.applicationState == .active,
+               self.wantsTorchOnAfterLensSwitch {
+                self.reenableTorchAfterLensSwitch()
+            } else {
+                if running { try? self.toggleTorch(.off) }
+                self.wantsTorchOnAfterLensSwitch = false
+            }
+
+            // Honour macro being disabled while an entry into macro was in flight.
+            if succeeded, self.isUsingMacroCamera,
+               !self.cameraPreferences.isMacroMode.isOn {
+                self.switchToStandardCamera()
+            }
         }
+    }
+
+    private func persistActiveDevice(_ device: AVCaptureDevice) {
+        cameraPreferences.captureDeviceId = device.uniqueID
+        userDefaults.currentCameraPreferences = cameraPreferences
+    }
+    
+    public func toggleTorch(_ mode: CameraPreferences.Torch) throws {
         
-        let currentTime = Date().timeIntervalSince1970 * 1000
-        return (currentTime - firstEmptyScan) > (cameraIdleTimeout * 1000)
-    }
-    
-    public func captureOutput(_ output: AVCaptureOutput,
-                              didOutput sampleBuffer: CMSampleBuffer,
-                              from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+        guard !isSwitchingLens else { return }
+        
+        let device = currentDevice ?? captureDeviceById(with: cameraPreferences.captureDeviceId)
+        guard let captureDevice = device, captureDevice.hasTorch else { return }
+
+        // Idempotency: if hardware is already in the desired state, skip entirely.
+        let desiredMode: AVCaptureDevice.TorchMode = mode == .on ? .on : .off
+        guard captureDevice.torchMode != desiredMode else {
+            torchEnabled = mode == .on
             return
         }
 
-        let callbackStart = ProcessInfo.processInfo.systemUptime
-        var tracedFrame: Int? = nil
 
-        defer {
-            if let number = tracedFrame {
-                let ms = Int(
-                    (ProcessInfo.processInfo.systemUptime - callbackStart) * 1_000
-                )
-                osirisMacroTrace("CALLBACK \(number) finished, work_ms=\(ms)")
-            }
+        try captureDevice.lockForConfiguration()
+        switch mode {
+        case .off:
+            captureDevice.torchMode = .off
+        case .on:
+            captureDevice.torchMode = .on
         }
         
-        if waitingForFrameAfterSwap {
-            postSwapFrameCount += 1
-            tracedFrame = postSwapFrameCount
-            osirisMacroTrace("CALLBACK \(postSwapFrameCount) received")
-            if postSwapFrameCount >= framesToSkipAfterSwap {
-                waitingForFrameAfterSwap = false
-                DispatchQueue.main.async { [weak self] in
-                    self?.unfreezePreview()
-                }
-            }
-        }
-        
-        if viewModel.scannerIsRunning && !viewModel.barcodeManager.barcodes.isEmpty {
-            emptyFrameDetectedTime = nil
-        } else {
-            if emptyFrameDetectedTime == nil {
-                emptyFrameDetectedTime = Date().timeIntervalSince1970 * 1000
-            } else if let emptyFrameDetectedTime = emptyFrameDetectedTime {
-                checkIdleState(emptyFrameDetectedTime)
-            }
-        }
-        
-        if let captureDevice = viewModel.cameraManager.activeCaptureDevice() {
-            viewModel.decoderManager.currentCaptureDevice = captureDevice
-        }
-        
-        if let pb = CMSampleBufferGetImageBuffer(sampleBuffer){
-            let s = centerROISharpness(from: pb)
-            viewModel.cameraManager.updateSharpnessScore(s)
-            
-            frameCounter += 1
-            if frameCounter % 10 == 0{
-                let sharp = viewModel.cameraManager.sharpnessSmoothed
-                let pos = viewModel.cameraManager.currentDevice?.lensPosition ?? -1
-                let usingUW = (viewModel.cameraManager.currentDevice?.deviceType == .builtInUltraWideCamera)
-//
-//                print(String(format: "[CAL] sharp≈%.1f  lensPos=%.3f  lens=%@",
-//                                 sharp, pos, usingUW ? "UltraWide" : "Wide"))
-                
-            }
-        }
-        
-        viewModel.processBuffer(pixelBuffer)
+        torchEnabled = mode == .on
+        captureDevice.unlockForConfiguration()
+        notifyTorchChanged(torchEnabled)
     }
+    
+    public func baselineZoom(for device: AVCaptureDevice) -> CGFloat {
+        switch device.deviceType {
+        case .builtInUltraWideCamera:
+            return 1.5 * Self.fovMatchRatio
+        default: return 1.5
+        }
+    }
+    
+    //    Expose func reset Zoom if needed
+    //    public func forceBaselineZoom() {
+    //        sessionQueue.async { [weak self] in
+    //            guard let self = self, let device = self.currentDevice else { return }
+    //
+    //            do {
+    //                try device.lockForConfiguration()
+    //                device.videoZoomFactor = 1.5
+    //                device.unlockForConfiguration()
+    //                print("[CameraManager] Reset zoom to 1.5×")
+    //            } catch {
+    //                print("Failed to reset zoom:", error)
+    //            }
+    //        }
+    //    }
+    
+}
+
+public extension Notification.Name {
+    static let osirisTorchDidChange = Notification.Name("osirisTorchDidChange")
 }
