@@ -1,1 +1,1 @@
-open -a TextEdit "/Users/p0a0595/Documents/GLASS_SCANNER_POC/glass-app/Configuration/Glass-Project-Developer.xcconfig"
+SWIFT_INCLUDE_PATHS = $(inherited) "$(OSIRIS_POC_ROOT)/OsirisKit.xcframework/$(OSIRIS_POC_SLICE)/OsirisKit.framework/Modules" "$(BUILT_PRODUCTS_DIR)/include"
