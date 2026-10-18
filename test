@@ -1,14 +1,1 @@
-cat >> Configuration/Glass-Project-Developer.xcconfig <<'EOF'
-
-// Local Osiris XCFramework POC configuration
-OSIRIS_POC_ROOT = /Users/p0a0595/Documents/GLASS_SCANNER_POC/glass-app/Vendor/OsirisPOC
-
-OSIRIS_POC_SLICE = ios-arm64
-OSIRIS_POC_SLICE[sdk=iphonesimulator*] = ios-arm64_x86_64-simulator
-
-ZXING_POC_SLICE = ios-arm64
-ZXING_POC_SLICE[sdk=iphonesimulator*] = ios-arm64-simulator
-
-SWIFT_INCLUDE_PATHS = $(inherited) "$(OSIRIS_POC_ROOT)/OsirisKit.xcframework/$(OSIRIS_POC_SLICE)/OsirisKit.framework/Modules"
-HEADER_SEARCH_PATHS = $(inherited) "$(OSIRIS_POC_ROOT)/ZXingCPP.xcframework/$(ZXING_POC_SLICE)/Headers"
-EOF
+ls -l "/Users/p0a0595/Library/Developer/Xcode/DerivedData/Walmart-eyhtcryrejmbjwdctfymszuaqtjx/Build/Products/Debug-iphoneos/include/ZXIFormat.h"
