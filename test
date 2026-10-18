@@ -1,1 +1,1 @@
-ls -l "/Users/p0a0595/Library/Developer/Xcode/DerivedData/Walmart-eyhtcryrejmbjwdctfymszuaqtjx/Build/Products/Debug-iphoneos/include/ZXIFormat.h"
+open -a TextEdit "/Users/p0a0595/Documents/GLASS_SCANNER_POC/glass-app/Configuration/Glass-Project-Developer.xcconfig"
