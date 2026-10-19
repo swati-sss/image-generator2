@@ -1,4 +1,0 @@
-export DEVELOPER_DIR="/Users/p0a0595/Downloads/Xcode.app/Contents/Developer"
-
-python3 "/Users/p0a0595/Downloads/recover_osiris_device.py" \
-  "/Users/p0a0595/Desktop/osirisiosupdate/osiris-ios-interface-fix"
