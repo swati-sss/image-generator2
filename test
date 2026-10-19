@@ -1,7 +1,1 @@
-xcodebuild build -scheme OsirisCamera \
-  -configuration Debug \
-  -destination "${PLATFORM_ARG}" \
-  -derivedDataPath "${SLICE_DIR}/DerivedData" \
-  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-  SKIP_INSTALL=NO BUILD_LIBRARY_FOR_DISTRIBUTION=YES CODE_SIGNING_ALLOWED=NO \
-  2>&1 | tee "${SLICE_DIR}/build.log" | tail -20
+ls -ld "build-xcframework/OsirisKit.xcframework" "build-xcframework/xcframework-iOS-OsirisKit-0.0.1.zip" "build-xcframework/zip-path.txt"
