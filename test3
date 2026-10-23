@@ -1,1 +1,28 @@
-test3
+Reducing Macro Lens-Switching Delay in Osiris iOS
+Issue
+When the phone moves close to a barcode, Osiris switches from the normal camera to the ultra-wide camera for close-up focus. During this transition, the preview appears frozen, making scanning feel slow and choppy.
+Device measurements showed transitions taking approximately 0.8–1.4 seconds, including the time taken to reveal the live preview again.
+Why the transition takes time
+The delay comes from both the camera change and additional work around it:
+- Camera reconfiguration: Osiris manually replaces the active camera input.
+- An additional pause: When switching back to the normal camera, the code waits 150 milliseconds before applying zoom.
+- Preview handling: Osiris shows a temporary snapshot and disables the live preview connection during the change.
+- A long fade: The snapshot then fades away over 400 milliseconds, extending the visible transition.
+The temporary snapshot helps hide the camera change, but the surrounding pauses and preview handling keep it visible longer than necessary.
+Proposed improvement
+The existing approach can be improved without changing the barcode decoder:
+1. Remove the fixed pause. Apply the camera change and zoom in sequence on the camera’s background queue.
+2. Keep the preview connection enabled. Use the snapshot to cover the transition while allowing the preview underneath to continue.
+3. Shorten the fade from 400 to 100 milliseconds. Reveal the live preview sooner once the camera change has finished and subsequent frames arrive.
+4. Handle interrupted transitions. Remove the snapshot if switching fails or the scanner closes, with a timeout to prevent it remaining on screen indefinitely.
+Expected performance improvement
+Measurements from a limited comparison on an iPhone 16 Pro running iOS 27 indicate the following achievable gains:
+Transition	Previous average	Indicative improved average	Reduction
+Normal → macro	925 ms	457 ms	Approximately 51%
+Macro → normal	1,357 ms	413 ms	Approximately 70%
+
+
+These figures measure the time from requesting a lens switch until the temporary snapshot has fully disappeared. They do not measure the time taken to decide that a switch is needed, achieve focus, or read a barcode.
+The expected result is a transition of roughly 0.4–0.5 seconds, with substantially less visible freezing. These gains require confirmation across additional devices and scanning conditions.
+Remaining limitation
+This proposal improves the existing manual lens-switching approach. Camera reconfiguration still takes time, so it does not guarantee a completely seamless transition. Validation should also confirm that barcode reading, torch behavior, and repeated close/far scanning remain reliable.
