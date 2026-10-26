@@ -1,127 +1,131 @@
 //
-//  OsirisConfig.swift
+//  CanvasTransforming.swift
 //  Osiris
 //
-//  Created by Kyle McGinnis on 2/20/24.
+//  Created by Kyle McGinnis on 1/5/24.
 //
 
 import Foundation
+import Vision
 
-/// `OsirisConfig` specifies all the settings for the Osiris barcode scanner.  Default values will work fine, but more fine-tuned control is possible - specifying regions of interest via the ReticleConfig, HintGroups ( image pre-processing strategies for better accuracy), and different SymbologyGroups (for a wider range of barcode decoding types).  `Extras` can be used for more specific and unconventional settings, sometimes reserved for embedding Apps with more permissions.
-public class OsirisConfig: ObservableObject, CustomStringConvertible {
+public protocol CanvasTransforming {
     
-    // MARK: Properties
+    func calculateROI(with pixelBuffer: CVImageBuffer,
+                      canvasSize: CGSize,
+                      reticleRect: CGRect,
+                      reticleEnabled: Bool) -> CGRect
     
-    @Published public internal(set) var partnerID: String
-    @Published public internal(set) var userID: String
-    @Published public internal(set) var symbologyGroup: SymbologyGroup
-    @Published public internal(set) var hintGroup: HintGroup
-    @Published public internal(set) var scanActionType: ScanActionType
-    @Published public internal(set) var reticleConfig: OsirisReticleConfig
-    @Published public internal(set) var cameraConfig: OsirisCameraConfig
-    @Published public internal(set) var feedbackConfig: OsirisFeedbackConfig
-    @Published public internal(set) var dynamicConfig: OsirisDynamicConfig
-    @Published public internal(set) var boundingBoxConfig: OsirisBoundingBoxConfig
-
-    /// Whether the SDK draws detected barcode boxes, including their labels and icons.
-    /// Defaults to `true`. Set to `false` when the host app draws its own boxes using
-    /// the geometry delivered by scanner callbacks. Detection and callbacks remain enabled;
-    /// the aiming reticle is configured separately through `reticleConfig`.
-    @Published public internal(set) var enableDisplayBoundingBox: Bool
-
-    /// Dictionary containing  properties that may or may not be available based on Partner Permissions
-    /// - Parameter hintsAdded: String Array - Hints to add to the enabled Hints, if permissions allow
-    /// - Parameter hintsRemoved: String Array -  Hints to remove from the enabled Hints
-    /// - Parameter symbologiesAdded: String Array -  Symbologies to add to the enabled Symbologies, if permissions allow
-    /// - Parameter symbologiesRemoved: String Array - Symbologies to remove from the enabled Symbologies
-    /// - Parameter allowBenchmarking: Bool - Turn on Benchmarking Output, if permissions allow
-    /// - Parameter benchmarkingOutputType: String - Type of output for Benchmarking - disk, gcs, other
-    /// - Parameter decoderType: String - Change Underlying Barcode Decoder, if permissions allow
-    /// - Parameter gpuAccelerationEnabled: Bool - GPU cropping of camera pixelbuffer
-    /// - Parameter multiScanEnabled: Bool - enabling multi-barcode scanning. Needed for ARUCO and VizPick support
-    @Published public internal(set) var extras: [String: Any]
-
-    // MARK: Lifecycle
+    func transformRect(originalBounds: CGRect,
+                       from oldContainerSize: CGSize,
+                       to newContainerSize: CGSize,
+                       originOffset offset: CGPoint,
+                       sizeOffset: CGSize,
+                       flipHorizontally shouldFlipHorizontally: Bool) -> CGRect
     
-    /// `init` for OsirisConfig
-    /// - Parameter partnerID: String - ID of the App embedding Osiris - for analytics and permissions
-    /// - Parameter userID: String - ID of the user currently running Osiris - for analytics
-    /// - Parameter symbologyGroup: SymbologyGroup - maps to different numbers of symbologies to attempt to decode ( more advanced = more cpu )
-    /// - Parameter hintGroup: HintGroup - maps to different numbers of hints ( image processing strategies ) to allow for better readability of barcodes ( more advanced = more cpu )
-    /// - Parameter scanActionType: ScanActionType - Single scan ( 1 barcode read and decoding stops ) or continuous scan ( keep scanning )
-    /// - Parameter reticleConfig: OsirisReticleConfig - the Reticle configuration setup for barcode scanner
-    /// - Parameter cameraConfig: OsirisCameraConfig - the Camera configuration setup for barcode scanner
-    /// - Parameter feedbackConfig: OsirisFeedbackConfig - maps different FeedbackEvents to sound/haptic feedback
-    /// - Parameter dynamicConfig: OsirisDynamicConfig - allows properties to be changed while the Scanner is running
-    /// - Parameter extras: [String: Any] - Dictionary containing  properties that may or may not be available based on Partner Permissions
-    /// - Parameter enableDisplayBoundingBox: Whether the SDK draws detected barcode boxes. Defaults to `true`; disabling it preserves detection and geometry callbacks.
-    public init(partnerID: String = "",
-                userID: String = "",
-                symbologyGroup: SymbologyGroup = .basic,
-                hintGroup: HintGroup = .basic,
-                scanActionType: ScanActionType = .single,
-                reticleConfig: OsirisReticleConfig = .init(),
-                cameraConfig: OsirisCameraConfig = .init(),
-                feedbackConfig: OsirisFeedbackConfig = .init(),
-                dynamicConfig: OsirisDynamicConfig = .init(),
-                boundingBoxConfig: OsirisBoundingBoxConfig = .init(),
-                extras: [String: Any] = [:],
-                enableDisplayBoundingBox: Bool = true) {
-        self.partnerID = partnerID
-        self.userID = userID
-        self.symbologyGroup = symbologyGroup
-        self.hintGroup = hintGroup
-        self.scanActionType = scanActionType
-        self.reticleConfig = reticleConfig
-        self.cameraConfig = cameraConfig
-        self.feedbackConfig = feedbackConfig
-        self.dynamicConfig = dynamicConfig
-        self.boundingBoxConfig = boundingBoxConfig
-        self.extras = extras
-        self.enableDisplayBoundingBox = enableDisplayBoundingBox
+    func transformRectOrigin(_ rect: CGRect,
+                             to newOrigin: CGPoint) -> CGRect
+    
+    func transformRect(fromNormalizedRect fromRect: CGRect,
+                       toSize size: CGSize) -> CGRect
+    
+    func normalizedRect(for rect: CGRect, withinFrame frame: CGRect) -> CGRect
+    
+}
+
+public extension CanvasTransforming {
+    
+    func calculateROI(with pixelBuffer: CVImageBuffer,
+                      canvasSize: CGSize,
+                      reticleRect: CGRect,
+                      reticleEnabled: Bool) -> CGRect {
+        let roiSize = canvasSize.width > 0 && canvasSize.height > 0 ? canvasSize : pixelBuffer.rect().size
+        let pixelBufferSize = pixelBuffer.rect().size
+
+        let reticleIsValid = reticleRect.width > 0 && reticleRect.height > 0 && reticleEnabled
+
+        if reticleEnabled && reticleIsValid {
+            // Use the minimum scale to preserve aspect ratio
+            let scale = min(pixelBufferSize.width / roiSize.width, pixelBufferSize.height / roiSize.height)
+            let scaledReticleSize = CGSize(width: reticleRect.width * scale, height: reticleRect.height * scale)
+            let scaledReticleOrigin = CGPoint(
+                x: (reticleRect.origin.x * scale) + (pixelBufferSize.width - roiSize.width * scale) / 2,
+                y: (reticleRect.origin.y * scale) + (pixelBufferSize.height - roiSize.height * scale) / 2
+            )
+            return CGRect(origin: scaledReticleOrigin, size: scaledReticleSize)
+        } else {
+           // Reticle disabled
+           let scale = min(pixelBufferSize.width / roiSize.width, pixelBufferSize.height / roiSize.height)
+           let scaledROISize = CGSize (
+               width: pixelBufferSize.width, height: ceil(roiSize.height * scale) )
+
+           let scaledROIOrigin = CGPoint(
+               x: 0,
+               y: floor((pixelBufferSize.height - scaledROISize.height) / 2)
+           )
+
+           return CGRect(origin: scaledROIOrigin, size: scaledROISize)
+        }
     }
     
-    public var description: String {
-        let result: String = "\nOsirisConfig:\n" +
-        "   partnerID: \(partnerID)\n" +
-        "   userID: \(userID)\n" +
-        "   symbologyGroup: \(symbologyGroup)\n" +
-        "   hintGroup: \(hintGroup)\n" +
-        "   scanActionType: \(scanActionType)\n" +
-        "   reticleConfig: \(reticleConfig)\n" +
-        "   cameraConfig: \(cameraConfig)\n" +
-        "   feedbackConfig: \(feedbackConfig)\n" +
-        "   dynamicConfig: \(dynamicConfig)\n" +
-        "   enableDisplayBoundingBox: \(enableDisplayBoundingBox)\n" +
-        "   extras: \(extras)\n"
-        return result
+    func transformRect(originalBounds: CGRect,
+                       from oldContainerSize: CGSize,
+                       to newContainerSize: CGSize,
+                       originOffset offset: CGPoint,
+                       sizeOffset: CGSize,
+                       flipHorizontally shouldFlipHorizontally: Bool = false) -> CGRect {
+        guard oldContainerSize.width > 0, oldContainerSize.height > 0,
+              newContainerSize.width > 0, newContainerSize.height > 0 else {
+            return .zero
+        }
+
+        // Calculate scaling factors for width and height
+        let scaleX = newContainerSize.width / oldContainerSize.width
+        let scaleY = newContainerSize.height / oldContainerSize.height
+
+        // Use the larger scaling factor to preserve aspect ratio
+        let uniformScaleFactor = max(scaleX, scaleY)
+
+        // Scale the original bounds uniformly
+        let scaledWidth = originalBounds.width * uniformScaleFactor
+        let scaledHeight = originalBounds.height * uniformScaleFactor
+
+        let scaledOriginX = originalBounds.origin.x * uniformScaleFactor
+        let scaledOriginY = originalBounds.origin.y * uniformScaleFactor
+        
+        // Cropped-image coordinates begin at the crop's origin in the preview,
+        // which may be off-center. Without a crop, center the aspect-fill image.
+        // `offset` is already in preview points; it must not be scaled again.
+        let offsetX = sizeOffset == .zero
+            ? (newContainerSize.width - oldContainerSize.width * uniformScaleFactor) / 2
+            : offset.x
+        let offsetY = sizeOffset == .zero
+            ? (newContainerSize.height - oldContainerSize.height * uniformScaleFactor) / 2
+            : offset.y
+        
+        // Create and return the transformed rectangle
+        let result = CGRect(x: scaledOriginX + offsetX, y: scaledOriginY + offsetY, width: scaledWidth, height: scaledHeight)
+        
+        if shouldFlipHorizontally {
+            let flippedOriginX = newContainerSize.width - result.origin.x - result.size.width
+            let flippedBB = CGRect(x: flippedOriginX, y: result.origin.y, width: result.size.width, height: result.size.height)
+            
+            // If result isn't valid no rectangle is displayed
+            return flippedBB.isValid() ? flippedBB : .zero
+        }
+        
+        // If result isn't valid no rectangle is displayed
+        return result.isValid() ? result : .zero
     }
     
-    // MARK: Public API
+    func transformRectOrigin(_ rect: CGRect, to newOrigin: CGPoint) -> CGRect {
+        let offsetX = newOrigin.x - rect.origin.x
+        let offsetY = newOrigin.y - rect.origin.y
+
+        return rect.offsetBy(dx: offsetX, dy: offsetY)
+    }
     
-    /// This will return an Array with Unique items - used for quick extras processing of Enums
-    /// - Parameter addedExtrasKey: `String` - This key maps to the [String] rawValues of the added items in the `extras`
-    /// - Parameter removedExtrasKey: `String` - This key maps to the [String] rawValues of the removed items in the `extras`
-    /// - Parameter initialItems: `[T]` -  This generic array of enums sets the type of the return value
-    /// - Returns: `[T]` - Returns the filtered items after adding and removing enums, where `T` is the type of `initialItems`
-    public func getFilteredExtras<T: RawRepresentable & Hashable>(addedExtrasKey: String,
-                                                                  removedExtrasKey: String,
-                                                                  initialItems: [T]) -> [T] where T.RawValue == String {
-        var filteredItems = initialItems
-        if let addedItems = self.extras[addedExtrasKey] as? [String] {
-            for itemName in addedItems {
-                if let item = T(rawValue: itemName) {
-                    filteredItems.append(item)
-                }
-            }
-        }
-        if let removedItems = self.extras[removedExtrasKey] as? [String] {
-            for itemName in removedItems {
-                if let item = T(rawValue: itemName) {
-                    filteredItems = filteredItems.filter { $0 != item }
-                }
-            }
-        }
-        return Array(Set(filteredItems)).sorted { $0.rawValue < $1.rawValue }
+    // To do: Replace this with a simple function that doesn't require Vision
+    func normalizedRect(for rect: CGRect, withinFrame frame: CGRect) -> CGRect {
+        VNNormalizedRectForImageRect(rect, Int(frame.width), Int(frame.height))
     }
 }
